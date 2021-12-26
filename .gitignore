@@ -15,7 +15,7 @@ downloads/
 eggs/
 .eggs/
 lib/
-lib64/
+lib64/ 
 parts/
 sdist/
 var/
@@ -75,6 +75,7 @@ docs/_build/
 target/
 
 # Jupyter Notebook
+*.ipynb
 .ipynb_checkpoints
 
 # IPython
@@ -128,5 +129,11 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# saved pickle files
+*.pkl
+
 # dataset related files
 *.gz
+Electronics/
+reviews_Cell_Phones_and_Accessories_5.json
+reviews_Electronics_5.json
