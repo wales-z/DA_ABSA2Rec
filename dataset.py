@@ -8,63 +8,53 @@ from torch.utils.data import Dataset, DataLoader, TensorDataset, RandomSampler, 
 from torch.utils.data.distributed import DistributedSampler
 
 
-class RS_dataset(Dataset):
-    """
-    Generate a pytorch Dataset object with preprocessed recommender system dataset.
-    """
-    def __init__(self, Dataset_name):
-        """
-        Get dataset file input and initilize the dataset object.
-        3 object will be got:
-            :reviews_df (pandas.core.frame.DataFrame): dataframe include 4 columns:[uid, iid, reviewText, overall], where overall means rating(1~5)
-            :udocs (dict): key is user id (uid) and value is a string list, each of the string is one review of a user.
-            :idocs (dict): key is item id (iid) and value is a string list, each of the string is one review of a user.
+def get_dataset(args, task, tokenizer, mode='train'):
+    processor = processors[task]()
+    # Load data features from cache or dataset file
+    cached_features_file = os.path.join(args.data_dir, 'cached_{}_{}_{}_{}'.format(
+        mode,
+        list(filter(None, args.model_name_or_path.split('/'))).pop(),
+        str(args.max_seq_length),
+        str(task)))
 
-        Args:
-            Dataset_name (String): name of the used RS dataset
-        """
-        self.Dataset_name = Dataset_name
-        bese_dir = "./data/" + Dataset_name + '/'
+    # if os.path.exists(cached_features_file):
+    #     print("cached_features_file:", cached_features_file)
+    #     features = torch.load(cached_features_file)
+    # else:
+    #logger.info("Creating features from dataset file at %s", args.data_dir)
+    label_list = processor.get_labels(args.tagging_schema)
+    if mode == 'train':
+        examples = processor.get_train_examples(args.data_dir, args.task_name, args.tagging_schema)
+    elif mode =='eval':
+        examples = processor.get_eval_examples(args.data_dir, args.task_name, args.tagging_schema)
+    elif mode =='test':
+        examples = processor.get_test_examples(args.data_dir, args.task_name, args.tagging_schema)
+    else:
+        raise Exception(f'unexpected mode: {mode}')
 
-        with open(base_dir + 'reviews_df.pkl') as file:
-            self.reviews_df = pickle.load(file)
-        # with open(base_dir + 'udocs.pkl') as file:
-        #     self.udocs = pickle.load(file)
-        # with open(base_dir + 'udocs.pkl') as file:
-        #     self.idocs = pickle.load(file)
+    all_ratings = torch.tensor([e.rating for e in examples], dtype=torch.float32)
+    all_uids = torch.tensor([e.uid for e in examples], dtype=torch.int32)
+    all_iids = torch.tensor([e.iid for e in examples], dtype=torch.int32)
 
-        self.uids = np.array(self.reviews_df['uid'], dtype = np.float32)
-        self.iids = np.array(self.reviews_df['iid'], dtype = np.float32)
-        self.ratings = np.array(self.reviews_df['overall'], dtype = np.float32)
-        file.close()
+    features = convert_examples_to_seq_features(examples=examples, label_list=label_list, tokenizer=tokenizer,
+                                                cls_token_at_end=bool(args.model_type in ['xlnet']),
+                                                cls_token=tokenizer.cls_token,
+                                                sep_token=tokenizer.sep_token,
+                                                cls_token_segment_id=2 if args.model_type in ['xlnet'] else 0,
+                                                pad_on_left=bool(args.model_type in ['xlnet']),
+                                                pad_token_segment_id=4 if args.model_type in ['xlnet'] else 0)
+    if args.local_rank in [-1, 0]:
+        #logger.info("Saving features into cached file %s", cached_features_file)
+        torch.save(features, cached_features_file)
 
-    def __getitem__(self, index):
-        """
-        Input the uid and iid to and return the corresponding rating and documents.
+    # Convert to Tensors and build dataset
+    all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+    all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
+    all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
 
-        Args:
-            index (np.ndarray) : a np-array whose elements mean which rows of the review_df to sample. (batch preocessing)
+    all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
 
-        Returns: a batch of uid, iid, rating
-            uid (np.ndarray): 
-            iid (np.ndarray): 
-            rating (np.ndarray): 
-        """
-        return self.uids[index], self.iids[index], self.ratings[index]
-
-    def __len__(self):
-        return len(self.reviews_df)
-
-
-class ABSA_dataset(Dataset):
-    """
-    Generate a pytorch Dataset object with ABSA dataset.
-    """
-    def __init__(self):
-        pass
-
-    def __getitem__(self):
-        pass
-
-    def __len__(self):
-        pass
+    # used in evaluation
+    all_evaluate_label_ids = [f.evaluate_label_ids for f in features]
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_ratings, all_uids, all_iids)
+    return dataset, all_evaluate_label_ids

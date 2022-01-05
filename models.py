@@ -1,22 +1,9 @@
-import numpy as np
 import torch
 import torch.nn as nn
-import torchvision
-# print(torch.__version__) # 1.10.0+cu102
-# print(torch.version.cuda) # 10.2
-# print(torch.backends.cudnn.version()) # 7605
-# print(torch.cuda.get_device_name(0)) # GeForce RTX 2080 Ti
-
-# 固定随机种子以保证可复现性
-np.random.seed(0)
-torch.manual_seed(0)
-torch.cuda.manual_seed_all(0)
-
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-
-# Device configuration
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+from transformers import BertModel, XLNetModel
+from BERT_E2E_ABSA.seq_utils import *
+from BERT_E2E_ABSA.bert import BertPreTrainedModel, XLNetPreTrainedModel
+from torch.nn import CrossEntropyLoss
 
 
 class TaggerConfig:
@@ -42,7 +29,8 @@ class BertABSATagger(BertPreTrainedModel):
             # print("Fine-tuning the pre-trained BERT...")
             self.bert = BertModel(bert_config)
         else:
-            raise Exception("Invalid transformer mode %s!!!" % bert_config.tfm_mode)
+            raise Exception("Invalid transformer mode %s!!!" %
+                            bert_config.tfm_mode)
         self.bert_dropout = nn.Dropout(bert_config.hidden_dropout_prob)
         # fix the parameters in BERT and regard it as feature extractor
         if bert_config.fix_tfm:
@@ -55,7 +43,8 @@ class BertABSATagger(BertPreTrainedModel):
             # hidden size at the penultimate layer
             penultimate_hidden_size = bert_config.hidden_size
         else:
-            self.tagger_dropout = nn.Dropout(self.tagger_config.hidden_dropout_prob)
+            self.tagger_dropout = nn.Dropout(
+                self.tagger_config.hidden_dropout_prob)
             if self.tagger_config.absa_type == 'lstm':
                 self.tagger = LSTM(input_size=bert_config.hidden_size,
                                    hidden_size=self.tagger_config.hidden_size,
@@ -72,22 +61,24 @@ class BertABSATagger(BertPreTrainedModel):
                                                          dropout=0.1)
             elif self.tagger_config.absa_type == 'san':
                 # vanilla self attention networks
-                self.tagger = SAN(d_model=bert_config.hidden_size, nhead=12, dropout=0.1)
+                self.tagger = SAN(
+                    d_model=bert_config.hidden_size, nhead=12, dropout=0.1)
             elif self.tagger_config.absa_type == 'crf':
                 self.tagger = CRF(num_tags=self.num_labels)
             else:
-                raise Exception('Unimplemented downstream tagger %s...' % self.tagger_config.absa_type)
+                raise Exception('Unimplemented downstream tagger %s...' %
+                                self.tagger_config.absa_type)
             penultimate_hidden_size = self.tagger_config.hidden_size
-        self.classifier = nn.Linear(penultimate_hidden_size, bert_config.num_labels)
+        self.classifier = nn.Linear(
+            penultimate_hidden_size, bert_config.num_labels)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None,
                 position_ids=None, head_mask=None):
         outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
                             attention_mask=attention_mask, head_mask=head_mask)
-        # [! my change here! ] bert_outputs is a deep-copy of original bert output
-        bert_outputs = outputs.clone()
         # the hidden states of the last Bert Layer, shape: (bsz, seq_len, hsz)
         tagger_input = outputs[0]
+        last_hidden_state = tagger_input.clone().detach()
         tagger_input = self.bert_dropout(tagger_input)
         #print("tagger_input.shape:", tagger_input.shape)
         if self.tagger is None or self.tagger_config.absa_type == 'crf':
@@ -107,7 +98,8 @@ class BertABSATagger(BertPreTrainedModel):
                 classifier_input = self.tagger(tagger_input)
                 classifier_input = classifier_input.transpose(0, 1)
             else:
-                raise Exception("Unimplemented downstream tagger %s..." % self.tagger_config.absa_type)
+                raise Exception("Unimplemented downstream tagger %s..." %
+                                self.tagger_config.absa_type)
             classifier_input = self.tagger_dropout(classifier_input)
             logits = self.classifier(classifier_input)
         outputs = (logits,) + outputs[2:]
@@ -117,47 +109,180 @@ class BertABSATagger(BertPreTrainedModel):
                 loss_fct = CrossEntropyLoss()
                 if attention_mask is not None:
                     active_loss = attention_mask.view(-1) == 1
-                    active_logits = logits.view(-1, self.num_labels)[active_loss]
+                    active_logits = logits.view(-1,
+                                                self.num_labels)[active_loss]
                     active_labels = labels.view(-1)[active_loss]
                     loss = loss_fct(active_logits, active_labels)
                 else:
-                    loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                    loss = loss_fct(
+                        logits.view(-1, self.num_labels), labels.view(-1))
                 outputs = (loss,) + outputs
             else:
-                log_likelihood = self.tagger(inputs=logits, tags=labels, mask=attention_mask)
+                log_likelihood = self.tagger(
+                    inputs=logits, tags=labels, mask=attention_mask)
                 loss = -log_likelihood
                 outputs = (loss,) + outputs
-        return outputs, logits, bert_outputs
+        # output[0] = tagging label loss, shape: (n_gpus)xx
+        # output[1] = tagging logits  shape: (n_gpus * batch_size, seq_len, num_labes=14)
+        return outputs, last_hidden_state
 
 
 class DA_ABSA2Rec(nn.Module):
-    def __init__(self, bert_config, Dataset_name, num_concats, ori_embedding_size, reduced_embedding_size, num_aspects):
-        self.num_concats = num_concats
+    def __init__(self, args, bert_config, num_users, num_items, batch_size=None, max_sequence_length=512, ori_embedding_size=768, reduced_embedding_size=192, num_aspects=5):
+        super(DA_ABSA2Rec, self).__init__()
+        self.args = args
         self.ori_embedding_size = ori_embedding_size
         self.reduced_embedding_size = reduced_embedding_size
         self.num_aspects = num_aspects
+        self.batch_size = batch_size
 
-        self.bertABSATagger = BertABSATagger(bert_config)
-        self.aspect_categorys = nn.Embedding(num_aspects, reduced_embedding_size)
+        self.bertABSATagger = BertABSATagger.from_pretrained(args.model_name_or_path, from_tf=bool('.ckpt' in args.model_name_or_path),
+                                                             config=bert_config, cache_dir='./cache')
+        self.aspect_categorys = nn.Embedding(
+            num_aspects, reduced_embedding_size)
+        self.aspect_categorys.weight.data.normal_(
+            0, 0.1)  # 初始化需要学习的 aspect categorys 表示向量
+        self.pooler = nn.AdaptiveMaxPool1d(reduced_embedding_size)
 
-        self.embedding_to_rating = nn.Linear(in_features, out_features, bias=true)
+        self.user_bias = nn.Embedding(num_users, 1)
+        self.item_bias = nn.Embedding(num_items, 1)
+        self.user_bias.weight.data.normal_(0, 0.01)  # 初始化 user 偏置
+        self.user_bias.weight.data.normal_(0, 0.01)  # 初始化 item 偏置
+
+        # 将tagging logits 转为情感注意力
+        self.to_sentiment_score = nn.Sequential(
+            nn.Linear(in_features=14, out_features=1),
+            nn.ReLU()
+        )
+
+        # 评分计算: 一层线性层的方式
+        self.embedding_to_rating = nn.Linear(
+            in_features=reduced_embedding_size, out_features=1, bias=True)
+
+        # 评分计算: MLP 方式
+        # self.embedding_to_rating = nn.Sequential(
+        #     nn.Linear(in_features=reduced_embedding_size, out_features=2*reduced_embedding_size),
+        #     nn.Linear(in_features=2*reduced_embedding_size, out_features=1)
+        # )
+        # 评分计算：类CATN方式:仅能用于用户/物品特征相互独立的方法
+        # self.aspect_correlation_matrix = nn.Embedding(num_aspects, num_aspects)
+
+    def ABSA_layer(self, input_ids, token_type_ids=None, attention_mask=None, tagging_labels=None,
+                   position_ids=None, head_mask=None):
+
+        return self.bertABSATagger(input_ids, position_ids=position_ids,
+                                                 token_type_ids=token_type_ids, attention_mask=attention_mask, labels=tagging_labels)
+
+        #tagging_loss, tagging_logits, last_hidden_state = absa_tagger_output[0], absa_tagger_output[1], absa_tagger_output[2]
+        # last_hidden_state.shape : (batch_size, seq_len, ori_embedding_size)
+        # return tagging_loss, tagging_logits, last_hidden_state
+
+    def aspect_gate_control(self, last_hidden_state, attention_mask, tagging_labels):
+        # tagging_labels.shape: (n_gpu * batch_size, seq_len)
+        # attention_mask.shape(n_gpu * batch_size, seq_len)
+        valid_seq_len = torch.count_nonzero(attention_mask, dim=-1)
+        attention_mask = attention_mask.unsqueeze(dim=-1)
+        last_hidden_state = last_hidden_state * attention_mask  # 不考虑 padding 的位置
+        del attention_mask
+        # 表示这个 batch 中每个序列中非 [PAD] 的有效序列的长度，shape: (batch_size)
+        # label=0, 对应tag = O
+
+        def tagging_label_to_mask(x, *y):
+            if x == 0:
+                return 0
+            else:
+                return 1
+        mask_matrix = tagging_labels.clone()
+#         mask_matrix = mask_matrix.to('cpu')
+        map(tagging_label_to_mask, mask_matrix)
+#         mask_matrix = mask_matrix.to(self.args.device)
+        mask_matrix = mask_matrix.unsqueeze(
+            dim=-1)  # shape (batch_size, seq_len,1)
+
+        # 依靠 tensor 乘法的广播机制，会将(batch_size, seq_len,1)的maks矩阵广播成跟last_hidden_state一样的shape
+        gate_control_output = last_hidden_state * mask_matrix
+
+        # embedding 降维
+        # shape: (batch_size, seq_len, redureduced_embedding_sizeced)
+        gate_control_output = self.pooler(gate_control_output)
+        return gate_control_output, valid_seq_len
+
+    def aspect_category_attention(self, gate_control_output):
+        aspect_specific_embeddings = []
+
+        for aspect_index in range(self.num_aspects):
+            broadcasted_aspect_category = self.aspect_categorys(torch.tensor([aspect_index]).to(model.args.device)).unsqueeze(
+                dim=0)  # shape:(1,reduced_embedding_size)
+            broadcasted_aspect_category = broadcasted_aspect_category.unsqueeze(
+                dim=0)  # shape:(1, 1, reduced_embedding_size)
+
+            # 先通过广播机制将 broadcasted_aspect_category 广播成 shape: (batch_size, seq_len, reduced_embedding_size), 再通过 sum 转成每个位置的内积
+            # shape(batch_size, seq_len)
+            dot_products = torch.sum(
+                broadcasted_aspect_category * gate_control_output, dim=-1)
+            temp_aspect_attention = nn.functional.softmax(
+                dot_products, dim=-1)  # shape(batch_size, seq_len)
+            temp_aspect_attention = temp_aspect_attention.unsqueeze(
+                dim=-1)  # shape(batch_size, seq_len, -1) 后面点乘的时候直接广播
+            aspect_specific_embeddings.append(
+                gate_control_output * temp_aspect_attention)
+
+        # shape(num_aspects, batch_size, seq_len, reduced_embedding_size)
+        return aspect_specific_embeddings
+
+    def sentiment_aware_attention(self, aspect_specific_embeddings, tagging_logits, valid_seq_len):
+        # tagging_logits.shape: (batch_size, seq_len, 14)
+        # valid_seq_len.shape: (batch_size)
+        # sentiment_score.shape:  (batch_size, seq_len, 1)
+        valid_seq_len = valid_seq_len.unsqueeze(dim=-1)
+        sentiment_score = self.to_sentiment_score(tagging_logits)
+        sentiment_attention = nn.functional.softmax(
+            sentiment_score, dim=-1)  # shape:  (batch_size, seq_len, 1)
         
+        for temp_aspect_specific_embedding in aspect_specific_embeddings:
+            temp_aspect_specific_embedding = sentiment_attention * temp_aspect_specific_embedding
+        
+        # shape (num_aspects, batch_size, reduced_embedding_size) 所有位置的embedding加起来，融合成一个位置长度的 embedding
+        sentiment_aware_embeddings = [] # list of len num_aspects, with each element shape:(batch_size, redueced_embedding_size)
+        for temp_aspect_specific_embedding in aspect_specific_embeddings:
+            temp_sentiment_aware_embedding = torch.sum(temp_aspect_specific_embedding, dim=2) / valid_seq_len
+            sentiment_aware_embeddings.append(temp_sentiment_aware_embedding)
+        sentiment_aware_embeddings = torch.stack(sentiment_aware_embeddings)
 
-    def embedding_layer(self):
-        pass
+        del aspect_specific_embeddings
 
-    def aspect_category_attention(self):
-        pass
+        return sentiment_aware_embeddings
 
-    def sentiment_aware_attention(self):
-        pass
+    def compute_rating(self, sentiment_aware_embeddings, uids, iids):
+        # review_embeddings (Tensor): (num_aspect, batch_size, reduced_embedding_size)
+        # 一层线性层的方式
+        aspect_specific_rating = self.embedding_to_rating(
+            sentiment_aware_embeddings)  # shape: (num_aspect, batch_size)
+        predicted_ratings = torch.sum(
+            aspect_specific_rating, dim=0)/self.num_aspects  # shape: (batch_size)
+        predicted_ratings = predicted_ratings + self.user_bias(uids) + self.item_bias(iids)
+        predicted_ratings = 1 + 4 * torch.sigmoid(predicted_ratings) # 限制输出范围为 1~5
 
-    def compute_rating(self, user_embedding, item_embedding):
-        concated_embedding = torch.concat(user_embedding, item_embedding)
-        return self.embedding_to_rating(concated_embedding)
+        return predicted_ratings
 
-    def concat_bert_outputs(self, num_concats):
-        pass
+        # MLP 方式
 
-    def forward(self):
-        pass
+    def forward(self, input_ids, uids, iids, token_type_ids=None, attention_mask=None, tagging_labels=None,
+                position_ids=None, head_mask=None):
+
+        (tagging_loss, tagging_logits), last_hidden_state = self.ABSA_layer(input_ids, token_type_ids=token_type_ids,
+                                      attention_mask=attention_mask, tagging_labels=tagging_labels)
+        gate_control_output, valid_seq_len = self.aspect_gate_control(
+            last_hidden_state, attention_mask, tagging_labels)
+
+        aspect_specific_embeddings = self.aspect_category_attention(
+            gate_control_output)
+
+
+        sentiment_aware_embeddings = self.sentiment_aware_attention(
+            aspect_specific_embeddings, tagging_logits, valid_seq_len)
+        
+        predicted_ratings = self.compute_rating(sentiment_aware_embeddings, uids, iids)
+
+        return predicted_ratings, tagging_loss
+

@@ -7,4 +7,6 @@ Some basic Information for the dataset we use.
 ### 1.1 Electronics
 
 ### 1.2 Cell Phones and Accessories
-
+user num: 27878
+item num: 10428
+review/rating num: 194439 

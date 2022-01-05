@@ -62,7 +62,7 @@ class InputFeatures(object):
 
 class SeqInputFeatures(object):
     """A single set of features of data for the ABSA task"""
-    def __init__(self, input_ids, input_mask, segment_ids, label_ids, evaluate_label_ids):
+    def __init__(self, input_ids, input_mask, segment_ids, evaluate_label_ids, label_ids=None):
         self.input_ids = input_ids
         self.input_mask = input_mask
         self.segment_ids = segment_ids
@@ -114,6 +114,9 @@ class ABSAProcessor(DataProcessor):
     def get_test_examples(self, data_dir, tagging_schema):
         return self._create_examples(data_dir=data_dir, set_type='test', tagging_schema=tagging_schema)
 
+    def get_inference_examples(self, data_dir, tagging_schema):
+        return self._create_examples(data_dir=data_dir, set_type='inference', tagging_schema=tagging_schema, mode = 'unlabeled')
+
     def get_labels(self, tagging_schema):
         if tagging_schema == 'OT':
             return []
@@ -126,49 +129,78 @@ class ABSAProcessor(DataProcessor):
         else:
             raise Exception("Invalid tagging schema %s..." % tagging_schema)
 
-    def _create_examples(self, data_dir, set_type, tagging_schema):
-        examples = []
-        file = os.path.join(data_dir, "%s.txt" % set_type)
-        class_count = np.zeros(3)
-        with open(file, 'r', encoding='UTF-8') as fp:
-            sample_id = 0
-            for line in fp:
-                sent_string, tag_string = line.strip().split('####')
-                words = []
-                tags = []
-                for tag_item in tag_string.split(' '):
-                    eles = tag_item.split('=')
-                    if len(eles) == 1:
-                        raise Exception("Invalid samples %s..." % tag_string)
-                    elif len(eles) == 2:
-                        word, tag = eles
+    def _create_examples(self, data_dir, set_type, tagging_schema, mode = 'labeled'):
+        if mode == 'labeled':
+            examples = []
+            file = os.path.join(data_dir, "%s.txt" % set_type)
+            class_count = np.zeros(3)
+            with open(file, 'r', encoding='UTF-8') as fp:
+                sample_id = 0
+                for line in fp:
+                    sent_string, tag_string = line.strip().split('####')
+                    words = []
+                    tags = []
+                    for tag_item in tag_string.split(' '):
+                        eles = tag_item.split('=')
+                        if len(eles) == 1:
+                            raise Exception("Invalid samples %s..." % tag_string)
+                        elif len(eles) == 2:
+                            word, tag = eles
+                        else:
+                            word = ''.join((len(eles) - 2) * ['='])
+                            tag = eles[-1]
+                        words.append(word)
+                        tags.append(tag)
+                    # convert from ot to bieos
+                    if tagging_schema == 'BIEOS':
+                        tags = ot2bieos_ts(tags)
+                    elif tagging_schema == 'BIO':
+                        tags = ot2bio_ts(tags)
                     else:
-                        word = ''.join((len(eles) - 2) * ['='])
-                        tag = eles[-1]
-                    words.append(word)
-                    tags.append(tag)
-                # convert from ot to bieos
-                if tagging_schema == 'BIEOS':
-                    tags = ot2bieos_ts(tags)
-                elif tagging_schema == 'BIO':
-                    tags = ot2bio_ts(tags)
-                else:
-                    # original tags follow the OT tagging schema, do nothing
-                    pass
-                guid = "%s-%s" % (set_type, sample_id)
-                text_a = ' '.join(words)
-                #label = [absa_label_vocab[tag] for tag in tags]
-                gold_ts = tag2ts(ts_tag_sequence=tags)
-                for (b, e, s) in gold_ts:
-                    if s == 'POS':
-                        class_count[0] += 1
-                    if s == 'NEG':
-                        class_count[1] += 1
-                    if s == 'NEU':
-                        class_count[2] += 1
-                examples.append(InputExample(guid=guid, text_a=text_a, text_b=None, label=tags))
-                sample_id += 1
-        print("%s class count: %s" % (set_type, class_count))
+                        # original tags follow the OT tagging schema, do nothing
+                        pass
+                    guid = "%s-%s" % (set_type, sample_id)
+                    text_a = ' '.join(words)
+                    #label = [absa_label_vocab[tag] for tag in tags]
+                    gold_ts = tag2ts(ts_tag_sequence=tags)
+                    for (b, e, s) in gold_ts:
+                        if s == 'POS':
+                            class_count[0] += 1
+                        if s == 'NEG':
+                            class_count[1] += 1
+                        if s == 'NEU':
+                            class_count[2] += 1
+                    examples.append(InputExample(guid=guid, text_a=text_a, text_b=None, label=tags))
+                    sample_id += 1
+            print("%s class count: %s" % (set_type, class_count))
+
+        elif mode == 'unlabeled':
+            def string_to_word_list(s):
+                s = s.replace(":",'')
+                s = s.replace(",",'')
+                s = s.replace(".",'')
+                s = s.replace("!",'')
+                s = s.replace("?",'')
+                return s.split()
+
+            examples = []
+            # file = data_dir + '/reviews_tiny.txt'
+            file = data_dir + '/reviews.txt'
+            class_count = np.zeros(3)
+            with open(file, 'r', encoding='UTF-8') as fp:
+                sample_id = 0
+                for line in fp:
+                    sent_string = line.strip()
+                    words = string_to_word_list(sent_string)
+                    tags = []
+
+                    guid = "%s-%s" % (set_type, sample_id)
+                    text_a = ' '.join(words)
+
+                    examples.append(InputExample(guid=guid, text_a=text_a, text_b=None, label=tags))
+                    sample_id += 1
+        else:
+            raise Exception("Invalid mode %s..." % mode)
         return examples
 
 
@@ -193,105 +225,198 @@ def convert_examples_to_seq_features(examples, label_list, tokenizer,
                                      cls_token_at_end=False, pad_on_left=False, cls_token='[CLS]',
                                      sep_token='[SEP]', pad_token=0, sequence_a_segment_id=0,
                                      sequence_b_segment_id=1, cls_token_segment_id=1, pad_token_segment_id=0,
-                                     mask_padding_with_zero=True):
-    # feature extraction for sequence labeling
-    label_map = {label: i for i, label in enumerate(label_list)}
-    features = []
-    max_seq_length = -1
-    examples_tokenized = []
-    for (ex_index, example) in enumerate(examples):
-        tokens_a = []
-        labels_a = []
-        evaluate_label_ids = []
-        words = example.text_a.split(' ')
-        wid, tid = 0, 0
-        for word, label in zip(words, example.label):
-            subwords = tokenizer.tokenize(word)
-            tokens_a.extend(subwords)
-            if label != 'O':
-                labels_a.extend([label] + ['EQ'] * (len(subwords) - 1))
+                                     mask_padding_with_zero=True, mode='labeled'):
+    if mode == 'labeled':
+        # feature extraction for sequence labeling
+        label_map = {label: i for i, label in enumerate(label_list)}
+        features = []
+        max_seq_length = -1
+        examples_tokenized = []
+        for (ex_index, example) in enumerate(examples):
+            tokens_a = []
+            labels_a = []
+            evaluate_label_ids = []
+            words = example.text_a.split(' ')
+            wid, tid = 0, 0
+            for word, label in zip(words, example.label):
+                subwords = tokenizer.tokenize(word)
+                tokens_a.extend(subwords)
+                if label != 'O':
+                    labels_a.extend([label] + ['EQ'] * (len(subwords) - 1))
+                else:
+                    labels_a.extend(['O'] * len(subwords))
+                evaluate_label_ids.append(tid)
+                wid += 1
+                # move the token pointer
+                tid += len(subwords)
+            #print(evaluate_label_ids)
+            assert tid == len(tokens_a)
+            evaluate_label_ids = np.array(evaluate_label_ids, dtype=np.int32)
+            examples_tokenized.append((tokens_a, labels_a, evaluate_label_ids))
+            if len(tokens_a) > max_seq_length:
+                max_seq_length = len(tokens_a)
+        # count on the [CLS] and [SEP]
+        max_seq_length += 2
+        #max_seq_length = 128
+        for ex_index, (tokens_a, labels_a, evaluate_label_ids) in enumerate(examples_tokenized):
+            #tokens_a = tokenizer.tokenize(example.text_a)
+
+            # Account for [CLS] and [SEP] with "- 2"
+            # for sequence labeling, better not truncate the sequence
+            #if len(tokens_a) > max_seq_length - 2:
+            #    tokens_a = tokens_a[:(max_seq_length - 2)]
+            #    labels_a = labels_a
+            tokens = tokens_a + [sep_token]
+            segment_ids = [sequence_a_segment_id] * len(tokens)
+            labels = labels_a + ['O']
+            if cls_token_at_end:
+                # evaluate label ids not change
+                tokens = tokens + [cls_token]
+                segment_ids = segment_ids + [cls_token_segment_id]
+                labels = labels + ['O']
             else:
-                labels_a.extend(['O'] * len(subwords))
-            evaluate_label_ids.append(tid)
-            wid += 1
-            # move the token pointer
-            tid += len(subwords)
-        #print(evaluate_label_ids)
-        assert tid == len(tokens_a)
-        evaluate_label_ids = np.array(evaluate_label_ids, dtype=np.int32)
-        examples_tokenized.append((tokens_a, labels_a, evaluate_label_ids))
-        if len(tokens_a) > max_seq_length:
-            max_seq_length = len(tokens_a)
-    # count on the [CLS] and [SEP]
-    max_seq_length += 2
-    #max_seq_length = 128
-    for ex_index, (tokens_a, labels_a, evaluate_label_ids) in enumerate(examples_tokenized):
-        #tokens_a = tokenizer.tokenize(example.text_a)
+                # right shift 1 for evaluate label ids
+                tokens = [cls_token] + tokens
+                segment_ids = [cls_token_segment_id] + segment_ids
+                labels = ['O'] + labels
+                evaluate_label_ids += 1
+            input_ids = tokenizer.convert_tokens_to_ids(tokens)
+            input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
+            # Zero-pad up to the sequence length.
+            padding_length = max_seq_length - len(input_ids)
+            #print("Current labels:", labels)
+            label_ids = [label_map[label] for label in labels]
 
-        # Account for [CLS] and [SEP] with "- 2"
-        # for sequence labeling, better not truncate the sequence
-        #if len(tokens_a) > max_seq_length - 2:
-        #    tokens_a = tokens_a[:(max_seq_length - 2)]
-        #    labels_a = labels_a
-        tokens = tokens_a + [sep_token]
-        segment_ids = [sequence_a_segment_id] * len(tokens)
-        labels = labels_a + ['O']
-        if cls_token_at_end:
-            # evaluate label ids not change
-            tokens = tokens + [cls_token]
-            segment_ids = segment_ids + [cls_token_segment_id]
-            labels = labels + ['O']
-        else:
-            # right shift 1 for evaluate label ids
-            tokens = [cls_token] + tokens
-            segment_ids = [cls_token_segment_id] + segment_ids
-            labels = ['O'] + labels
-            evaluate_label_ids += 1
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
-        input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
-        # Zero-pad up to the sequence length.
-        padding_length = max_seq_length - len(input_ids)
-        #print("Current labels:", labels)
-        label_ids = [label_map[label] for label in labels]
+            # pad the input sequence and the mask sequence
+            if pad_on_left:
+                input_ids = ([pad_token] * padding_length) + input_ids
+                input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
+                segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
+                # pad sequence tag 'O'
+                label_ids = ([0] * padding_length) + label_ids
+                # right shift padding_length for evaluate_label_ids
+                evaluate_label_ids += padding_length
+            else:
+                # evaluate ids not change
+                input_ids = input_ids + ([pad_token] * padding_length)
+                input_mask = input_mask + ([0 if mask_padding_with_zero else 1] * padding_length)
+                segment_ids = segment_ids + ([pad_token_segment_id] * padding_length)
+                # pad sequence tag 'O'
+                label_ids = label_ids + ([0] * padding_length)
+            assert len(input_ids) == max_seq_length
+            assert len(input_mask) == max_seq_length
+            assert len(segment_ids) == max_seq_length
+            assert len(label_ids) == max_seq_length
 
-        # pad the input sequence and the mask sequence
-        if pad_on_left:
-            input_ids = ([pad_token] * padding_length) + input_ids
-            input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
-            segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
-            # pad sequence tag 'O'
-            label_ids = ([0] * padding_length) + label_ids
-            # right shift padding_length for evaluate_label_ids
-            evaluate_label_ids += padding_length
-        else:
-            # evaluate ids not change
-            input_ids = input_ids + ([pad_token] * padding_length)
-            input_mask = input_mask + ([0 if mask_padding_with_zero else 1] * padding_length)
-            segment_ids = segment_ids + ([pad_token_segment_id] * padding_length)
-            # pad sequence tag 'O'
-            label_ids = label_ids + ([0] * padding_length)
-        assert len(input_ids) == max_seq_length
-        assert len(input_mask) == max_seq_length
-        assert len(segment_ids) == max_seq_length
-        assert len(label_ids) == max_seq_length
+#             if ex_index < 5:
+#                 logger.info("*** Example ***")
+#                 logger.info("guid: %s" % (example.guid))
+#                 logger.info("tokens: %s" % " ".join(
+#                         [str(x) for x in tokens]))
+#                 logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
+#                 logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
+#                 logger.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+#                 logger.info("labels: %s " % ' '.join([str(x) for x in label_ids]))
+#                 logger.info("evaluate label ids: %s" % evaluate_label_ids)
 
-        if ex_index < 5:
-            logger.info("*** Example ***")
-            logger.info("guid: %s" % (example.guid))
-            logger.info("tokens: %s" % " ".join(
-                    [str(x) for x in tokens]))
-            logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
-            logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
-            logger.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-            logger.info("labels: %s " % ' '.join([str(x) for x in label_ids]))
-            logger.info("evaluate label ids: %s" % evaluate_label_ids)
+            features.append(
+                SeqInputFeatures(input_ids=input_ids,
+                                input_mask=input_mask,
+                                segment_ids=segment_ids,
+                                label_ids=label_ids,
+                                evaluate_label_ids=evaluate_label_ids))
 
-        features.append(
-            SeqInputFeatures(input_ids=input_ids,
-                             input_mask=input_mask,
-                             segment_ids=segment_ids,
-                             label_ids=label_ids,
-                             evaluate_label_ids=evaluate_label_ids))
+    elif mode == 'unlabeled':
+        # feature extraction for sequence labeling
+        label_map = {label: i for i, label in enumerate(label_list)}
+        features = []
+        max_seq_length = 510
+        examples_tokenized = []
+        for (ex_index, example) in enumerate(examples):
+            tokens_a = []
+            evaluate_label_ids = []
+            words = example.text_a.split(' ')
+            wid, tid = 0, 0
+            for word in words:
+                subwords = tokenizer.tokenize(word)
+                tokens_a.extend(subwords)
+                evaluate_label_ids.append(tid)
+                wid += 1
+                # move the token pointer
+                tid += len(subwords)
+
+            #print(evaluate_label_ids)
+            assert tid == len(tokens_a)
+            evaluate_label_ids = np.array(evaluate_label_ids, dtype=np.int32)
+            examples_tokenized.append((tokens_a, evaluate_label_ids))
+
+        # count on the [CLS] and [SEP]
+        max_seq_length += 2
+        #max_seq_length = 512
+        for ex_index, (tokens_a, evaluate_label_ids) in enumerate(examples_tokenized):
+            #tokens_a = tokenizer.tokenize(example.text_a)
+
+            # Account for [CLS] and [SEP] with "- 2"
+            # for sequence labeling, better not truncate the sequence
+            #if len(tokens_a) > max_seq_length - 2:
+            #    tokens_a = tokens_a[:(max_seq_length - 2)]
+            #    labels_a = labels_a
+            tokens = tokens_a + [sep_token]
+            segment_ids = [sequence_a_segment_id] * len(tokens)
+            if cls_token_at_end:
+                # evaluate label ids not change
+                tokens = tokens + [cls_token]
+                segment_ids = segment_ids + [cls_token_segment_id]
+            else:
+                # right shift 1 for evaluate label ids
+                tokens = [cls_token] + tokens
+                segment_ids = [cls_token_segment_id] + segment_ids
+                evaluate_label_ids += 1
+            input_ids = tokenizer.convert_tokens_to_ids(tokens)
+            input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
+            # Zero-pad up to the sequence length.
+            padding_length = max_seq_length - len(input_ids)
+            #print("Current labels:", labels)
+
+            # pad the input sequence and the mask sequence
+            if pad_on_left:
+                input_ids = ([pad_token] * padding_length) + input_ids
+                input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
+                segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
+                # right shift padding_length for evaluate_label_ids
+                evaluate_label_ids += padding_length
+            else:
+                # evaluate ids not change
+                input_ids = input_ids + ([pad_token] * padding_length)
+                input_mask = input_mask + ([0 if mask_padding_with_zero else 1] * padding_length)
+                segment_ids = segment_ids + ([pad_token_segment_id] * padding_length)
+            # 对长序列进行截断处理
+            input_ids = input_ids[:max_seq_length]
+            input_mask = input_mask[:max_seq_length]
+            segment_ids = segment_ids[:max_seq_length]
+            # print(f'len(input_ids)={len(input_ids)}, len(input_mask)={len(input_mask)}, len(segment_ids)={len(segment_ids)}')
+            assert len(input_ids) == max_seq_length
+            assert len(input_mask) == max_seq_length
+            assert len(segment_ids) == max_seq_length
+
+#             if ex_index < 5:
+#                 logger.info("*** Example ***")
+#                 logger.info("guid: %s" % (example.guid))
+#                 logger.info("tokens: %s" % " ".join(
+#                         [str(x) for x in tokens]))
+#                 logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
+#                 logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
+#                 logger.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+#                 logger.info("evaluate label ids: %s" % evaluate_label_ids)
+
+            features.append(
+                SeqInputFeatures(input_ids=input_ids,
+                                input_mask=input_mask,
+                                segment_ids=segment_ids,
+                                evaluate_label_ids=evaluate_label_ids))
+    else:
+        raise Exception("Invalid mode %s..." % mode)
+
     print("maximal sequence length is", max_seq_length)
     return features
 
@@ -521,6 +646,8 @@ processors = {
     "rest14": ABSAProcessor,
     "rest15": ABSAProcessor,
     "rest16": ABSAProcessor,
+    "electronics": ABSAProcessor,
+    "cell_phones_and_accessories": ABSAProcessor,
 }
 
 output_modes = {
@@ -540,4 +667,6 @@ output_modes = {
     "rest15": "classification",
     "rest16": "classification",
     "rest_total_revised": "classification",
+    "electronics": "classification",
+    "cell_phones_and_accessories": "classification",
 }

@@ -134,6 +134,19 @@ dmypy.json
 
 # dataset related files
 *.gz
-Electronics/
+*.json
+electronics/
+cell_phones_and_accessories/
+laptop14/
 reviews_Cell_Phones_and_Accessories_5.json
 reviews_Electronics_5.json
+/data/cache
+/data/cell_phones_and_accessories
+/data/laptop14
+/cache
+/runs
+
+# ABSA module part
+/BERT_E2E_ABSA/bert-tfm-laptop14-finetune
+/BERT_E2E_ABSA/cache
+/BERT_E2E_ABSA/runs
