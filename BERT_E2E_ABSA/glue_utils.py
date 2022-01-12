@@ -184,8 +184,8 @@ class ABSAProcessor(DataProcessor):
                 return s.split()
 
             examples = []
-            # file = data_dir + '/reviews_tiny.txt'
-            file = data_dir + '/reviews.txt'
+            file = data_dir + '/reviews_tiny.txt'
+            # file = data_dir + '/reviews.txt'
             class_count = np.zeros(3)
             with open(file, 'r', encoding='UTF-8') as fp:
                 sample_id = 0

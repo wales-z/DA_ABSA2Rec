@@ -1,7 +1,7 @@
 import json
 import glob
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 from tensorboardX import SummaryWriter
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
@@ -226,7 +226,7 @@ def train(args, train_dataset, model, tokenizer):
                       # XLM don't use segment_ids
                       'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
                       'labels':         batch[3]}
-            outputs = model(**inputs)
+            outputs, _ = model(**inputs)
             # loss with attention mask
             # model outputs are always tuple in pytorch-transformers (see doc)
             loss = outputs[0]
@@ -326,7 +326,7 @@ def evaluate(args, model, tokenizer, mode, prefix=""):
                           # XLM don't use segment_ids
                           'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
                           'labels':         batch[3]}
-                outputs = model(**inputs)
+                outputs, _ = model(**inputs)
                 # logits: (bsz, seq_len, label_size)
                 # here the loss is the masked loss
                 tmp_eval_loss, logits = outputs[:2]
@@ -409,8 +409,8 @@ def inference(args, inference_dataset, model, tokenizer, mode='inference', outpu
                         i in label_map.items()}  # id(int) to tag(str)
 
 
-    # output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews_tiny.txt')
-    output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews.txt')
+    output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews_tiny.txt')
+    # output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews.txt')
     with open(output_dir, 'w') as output_file:
         for batch in tqdm(inference_dataloader, desc="inferencing"):
             model.eval()
@@ -422,7 +422,7 @@ def inference(args, inference_dataset, model, tokenizer, mode='inference', outpu
                         # XLM don't use segment_ids
                         'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
                         }
-                outputs = model(**inputs)
+                outputs, _ = model(**inputs)
                 # output is: (logits, bert-output)
                 # logits: (bsz, seq_len, label_size)
                 # here the loss is the masked loss
@@ -745,14 +745,14 @@ def main():
     log_file.write('******************************************\n')
     log_file.close()
 
-    # inference phase
-    inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
-        args, args.task_name, tokenizer, mode='inference')
-    inference(args, inference_dataset, model, tokenizer)
+    # # inference phase
+    # inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
+    #     args, args.task_name, tokenizer, mode='inference')
+    # inference(args, inference_dataset, model, tokenizer)
 
-    # generate tagged reviews dataframe file
-    dataset_name = 'cell_phones_and_accessories'
-    to_tagged_reviews_df(args, dataset_name, tiny=False)
+    # # generate tagged reviews dataframe file
+    # dataset_name = 'cell_phones_and_accessories'
+    # to_tagged_reviews_df(args, dataset_name, tiny=True)
 
 
 if __name__ == '__main__':

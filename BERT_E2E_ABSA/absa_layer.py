@@ -437,6 +437,7 @@ class BertABSATagger(BertPreTrainedModel):
                             attention_mask=attention_mask, head_mask=head_mask)
         # the hidden states of the last Bert Layer, shape: (bsz, seq_len, hsz)
         tagger_input = outputs[0]
+        last_hidden_state = tagger_input.clone().detach()
         tagger_input = self.bert_dropout(tagger_input)
         #print("tagger_input.shape:", tagger_input.shape)
         if self.tagger is None or self.tagger_config.absa_type == 'crf':
@@ -476,7 +477,7 @@ class BertABSATagger(BertPreTrainedModel):
                 log_likelihood = self.tagger(inputs=logits, tags=labels, mask=attention_mask)
                 loss = -log_likelihood
                 outputs = (loss,) + outputs
-        return outputs
+        return outputs, last_hidden_state
 
 
 class XLNetABSATagger(XLNetPreTrainedModel):

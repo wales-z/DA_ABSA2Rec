@@ -36,13 +36,16 @@ class InputExample(object):
 
 class SeqInputFeatures(object):
     """A single set of features of data for the ABSA task"""
-    def __init__(self, input_ids, input_mask, segment_ids, label_ids, evaluate_label_ids):
+    def __init__(self, input_ids, input_mask, segment_ids, label_ids, evaluate_label_ids, rating, uid, iid):
         self.input_ids = input_ids
         self.input_mask = input_mask
         self.segment_ids = segment_ids
         self.label_ids = label_ids
         # mapping between word index and head token index
         self.evaluate_label_ids = evaluate_label_ids
+        self.rating = rating
+        self.uid = uid
+        self.iid = iid
 
 
 class DataProcessor(object):
@@ -84,6 +87,8 @@ SMALL_POSITIVE_CONST = 1e-4
 
 
 class ABSAProcessor(DataProcessor):
+    def __init__(self, tiny=False):
+        self.tiny = tiny
     """Processor for the ABSA datasets"""
     def get_train_examples(self, data_dir, task_name, tagging_schema):
         return self._create_examples(data_dir=data_dir, task_name=task_name, mode='train', tagging_schema=tagging_schema)
@@ -107,8 +112,10 @@ class ABSAProcessor(DataProcessor):
             raise Exception("Invalid tagging schema %s..." % tagging_schema)
 
     def _create_examples(self, data_dir, task_name, tagging_schema, mode='train'):
-        postfix = '_tiny'
-        # postfix = ''
+        if self.tiny == True:
+            postfix = '_tiny'
+        else:
+            postfix = ''
         examples = []
         # file = os.path.join(data_dir, "tagged_reviews_df.pkl")
         file_path = os.path.join(data_dir, task_name, 'tagged_reviews_df_' + mode + postfix+ '.pkl')
@@ -189,14 +196,14 @@ def convert_examples_to_seq_features(examples, label_list, tokenizer,
         #print(evaluate_label_ids)
         assert tid == len(tokens_a)
         evaluate_label_ids = np.array(evaluate_label_ids, dtype=np.int32)
-        examples_tokenized.append((tokens_a, labels_a, evaluate_label_ids))
+        examples_tokenized.append((tokens_a, labels_a, evaluate_label_ids, example.rating, example.uid, example.iid))
         if len(tokens_a) > max_seq_length:
             max_seq_length = len(tokens_a)
     max_seq_length = min(510, max_seq_length)
     # count on the [CLS] and [SEP]
     max_seq_length += 2
     #max_seq_length = 128
-    for ex_index, (tokens_a, labels_a, evaluate_label_ids) in enumerate(examples_tokenized):
+    for ex_index, (tokens_a, labels_a, evaluate_label_ids, rating, uid, iid) in enumerate(examples_tokenized):
         #tokens_a = tokenizer.tokenize(example.text_a)
 
         # Account for [CLS] and [SEP] with "- 2"
@@ -270,7 +277,11 @@ def convert_examples_to_seq_features(examples, label_list, tokenizer,
                              input_mask=input_mask,
                              segment_ids=segment_ids,
                              label_ids=label_ids,
-                             evaluate_label_ids=evaluate_label_ids))
+                             evaluate_label_ids=evaluate_label_ids,
+                             rating=rating,
+                             uid=uid,
+                             iid=iid
+                             ))
     print("maximal sequence length is", max_seq_length)
     return features
 

@@ -142,9 +142,15 @@ reviews_Cell_Phones_and_Accessories_5.json
 reviews_Electronics_5.json
 /data/cache
 /data/cell_phones_and_accessories
+/data/yelp
 /data/laptop14
 /cache
 /runs
+/log
+/data/cached_test_bert-base-uncased_512_cell_phones_and_accessories_tiny
+/data/cached_train_bert-base-uncased_512_cell_phones_and_accessories
+/data/cached_train_bert-base-uncased_512_cell_phones_and_accessories_tiny
+/data/cached_test_bert-base-uncased_512_cell_phones_and_accessories
 
 # ABSA module part
 /BERT_E2E_ABSA/bert-tfm-laptop14-finetune

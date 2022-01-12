@@ -6,6 +6,7 @@ import pickle
 import torch
 import torch.nn as nn
 import argparse
+import tqdm
 
 from collections import defaultdict
 from itertools import count
@@ -24,21 +25,22 @@ class Preprocessor:
     def __init__(self, dataset_name, tiny=False):
         self.base_dir = './' + dataset_name+'/'
         rawfile_path = dataset_to_rawfile_name[dataset_name]
-        # 这句可能导致一个用户的交互数少于5
         raw_df = pd.read_json(rawfile_path,lines=True)
 
-        # 消除所有空评论
+        # 消除所有空评论,这句可能导致一个用户的交互数少于5
         df = raw_df[raw_df['reviewText']!='']
 
         if tiny == True:
-            df = df[:10000]
+            df = df[:40000]
             df = self.filterout(df, 5, 5).reset_index(drop=True)
-            df = self.convert_idx(df)
-            self.save_to_file(dataset_name, df, postfix='_tiny')
+            df, user_set, item_set = self.convert_idx(df)
+            udocs, idocs = self.get_documents(df, user_set, item_set)
+            self.save_to_file(dataset_name, df, postfix='_tiny', udocs=udocs, idocs=idocs)
         else:
             df = self.filterout(df, 5, 5).reset_index(drop=True)
-            df = self.convert_idx(df)
-            self.save_to_file(dataset_name, df)
+            df, user_set, item_set = self.convert_idx(df)
+            udocs, idocs = self.get_documents(df, user_set, item_set)
+            self.save_to_file(dataset_name, df, udocs=udocs, idocs=idocs)
 
     def filterout(self, df, thre_i, thre_u):
 #         index = df[["overall", "asin"]].groupby('asin').count() >= thre_i
@@ -71,18 +73,17 @@ class Preprocessor:
         print(f'item num:{len(item_set)}')
         print(f'rating num = review num:{len(df["reviewText"])}')
 
-        return df[["uid","iid","reviewText","overall"]]
+        return df[["uid","iid","reviewText","overall"]], user_set, item_set
 
-    def get_documents(self, udict, idict):
-        udocs = defaultdict(list)
-    
-        for uid in udict.values():
-            udocs[uid] = df[df['uid']==0]['reviewText'].tolist()
-        
-        idocs = defaultdict(list)
-        
-        for iid in idict.values():
-            idocs[iid] = df[df['iid']==0]['reviewText'].tolist()
+    def get_documents(self, df, user_set, item_set):
+        udocs, idocs = {}, {}
+        for uid in user_set:
+            string_list = df[df['uid']==uid]['reviewText'].tolist()
+            udocs[uid] = ' '.join(string_list)
+
+        for iid in item_set:
+            string_list = df[df['uid']==uid]['reviewText'].tolist()
+            idocs[iid] = ' '.join(string_list)
         
         return udocs, idocs
 
@@ -115,6 +116,7 @@ class Preprocessor:
             f_idocs.close()
 
 
+
 def split_dataset(dataset_name, df, tiny = False):
     base_dir = "./"+dataset_name+"/tagged_reviews_df_"
     
@@ -122,7 +124,7 @@ def split_dataset(dataset_name, df, tiny = False):
     uid_set.remove(0)
     dataset_first_user = df[df['uid']==0]
     train_dataset, test_dataset = train_test_split(dataset_first_user, test_size = 0.2)
-    for uid in uid_set:
+    for uid in tqdm(uid_set):
         temp_user_dataset = df[df['uid']==uid]
         temp_train_dataset, temp_test_dataset = train_test_split(temp_user_dataset, test_size = 0.2)
         train_dataset = train_dataset.append(temp_train_dataset)
