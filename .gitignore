@@ -144,6 +144,10 @@ reviews_Electronics_5.json
 /data/cell_phones_and_accessories
 /data/yelp
 /data/laptop14
+/data/cached_item_bert-base-uncased_512_cell_phones_and_accessories_tiny
+/data/cached_refinetune_bert-base-uncased_512_cell_phones_and_accessories
+/data/cached_refinetune_bert-base-uncased_512_cell_phones_and_accessories_tiny
+/data/cached_user_bert-base-uncased_512_cell_phones_and_accessories_tiny
 /cache
 /runs
 /log

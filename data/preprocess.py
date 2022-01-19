@@ -23,6 +23,7 @@ dataset_to_rawfile_name = {
 
 class Preprocessor:
     def __init__(self, dataset_name, tiny=False):
+        print('doing: preprocess {dataset_name} dataset')
         self.base_dir = './' + dataset_name+'/'
         rawfile_path = dataset_to_rawfile_name[dataset_name]
         raw_df = pd.read_json(rawfile_path,lines=True)
@@ -31,16 +32,17 @@ class Preprocessor:
         df = raw_df[raw_df['reviewText']!='']
 
         if tiny == True:
-            df = df[:40000]
+            df = df[:30000]
             df = self.filterout(df, 5, 5).reset_index(drop=True)
             df, user_set, item_set = self.convert_idx(df)
-            udocs, idocs = self.get_documents(df, user_set, item_set)
+            # udocs, idocs = self.get_documents(df, user_set, item_set)
             self.save_to_file(dataset_name, df, postfix='_tiny', udocs=udocs, idocs=idocs)
         else:
             df = self.filterout(df, 5, 5).reset_index(drop=True)
             df, user_set, item_set = self.convert_idx(df)
-            udocs, idocs = self.get_documents(df, user_set, item_set)
-            self.save_to_file(dataset_name, df, udocs=udocs, idocs=idocs)
+            # udocs, idocs = self.get_documents(df, user_set, item_set)
+            self.save_to_file(dataset_name, df)
+        print('preprocess {dataset_name} dataset: done')
 
     def filterout(self, df, thre_i, thre_u):
 #         index = df[["overall", "asin"]].groupby('asin').count() >= thre_i
@@ -82,9 +84,9 @@ class Preprocessor:
             udocs[uid] = ' '.join(string_list)
 
         for iid in item_set:
-            string_list = df[df['uid']==uid]['reviewText'].tolist()
+            string_list = df[df['iid']==iid]['reviewText'].tolist()
             idocs[iid] = ' '.join(string_list)
-        
+
         return udocs, idocs
 
     def save_to_file(self, dataset_name, reviews_df, udict=None, idict=None, udocs=None, idocs=None, postfix=''):
@@ -115,20 +117,77 @@ class Preprocessor:
                 pickle.dump(idocs, f_idocs)
             f_idocs.close()
 
+def trainDF_to_tagged_documents(dataset_name, df, tiny=False):
+    print(f'doing: make tagged udocs/idocs from tagged reviews of train set')
+    user_set = set(df["uid"])
+    item_set = set(df["iid"])
+    tagged_udocs, tagged_idocs = {}, {}
+    for uid in user_set:
+        string_list = df[df['uid']==uid]['tagged_reviews'].tolist()
+        sentence_list, tag_list = [], []
+        for string in string_list:
+            [sentence, tags] = string.strip().split('####')
+            sentence_list.append(sentence.replace('[SEP]', ''))
+            tag_list.append(tags.replace('[SEP]=O', ''))
+        tagged_udocs[uid] = ' '.join(sentence_list) + '####' + ' '.join(tag_list)
 
+    for iid in item_set:
+        string_list = df[df['iid']==iid]['tagged_reviews'].tolist()
+        sentence_list, tag_list = [], []
+        for string in string_list:
+            [sentence, tags] = string.strip().split('####')
+            sentence_list.append(sentence.replace('[SEP]', ''))
+            tag_list.append(tags.replace('[SEP]=O', ''))
+        tagged_idocs[iid] = ' '.join(sentence_list) + '####' + ' '.join(tag_list)
+
+    if tiny == True:
+        output_dir = os.path.join(dataset_name, 'tagged_udocs_tiny.pkl')
+        with open(output_dir, 'wb') as f_tagged_udocs:
+            pickle.dump(tagged_udocs, f_tagged_udocs)
+
+        output_dir = os.path.join(dataset_name, 'tagged_idocs_tiny.pkl')
+        with open(output_dir, 'wb') as f_tagged_idocs:
+            pickle.dump(tagged_idocs, f_tagged_idocs)
+    else:
+        output_dir = os.path.join(dataset_name, 'tagged_udocs.pkl')
+        with open(output_dir, 'wb') as f_tagged_udocs:
+            pickle.dump(tagged_udocs, f_tagged_udocs)
+
+        output_dir = os.path.join(dataset_name, 'tagged_idocs.pkl')
+        with open(output_dir, 'wb') as f_tagged_idocs:
+            pickle.dump(tagged_idocs, f_tagged_idocs)
+    print(f'save tagged udocs and idocs: done')
 
 def split_dataset(dataset_name, df, tiny = False):
+    print(f'doing: split dataset')
     base_dir = "./"+dataset_name+"/tagged_reviews_df_"
     
     uid_set = set(df['uid'])
     uid_set.remove(0)
     dataset_first_user = df[df['uid']==0]
     train_dataset, test_dataset = train_test_split(dataset_first_user, test_size = 0.2)
-    for uid in tqdm(uid_set):
+    for uid in uid_set:
         temp_user_dataset = df[df['uid']==uid]
         temp_train_dataset, temp_test_dataset = train_test_split(temp_user_dataset, test_size = 0.2)
         train_dataset = train_dataset.append(temp_train_dataset)
         test_dataset = test_dataset.append(temp_test_dataset)
+    
+    # remove items that only appear in test set, since they have no corresponding reviews in train set thus we can't create their document
+    test_dataset = test_dataset[test_dataset['iid'].isin(set(train_dataset['iid']))]
+
+    # reset the item ids
+    train_dataset['asin'] = train_dataset['iid']
+    iiterator = count(0)
+    idict = defaultdict(lambda: next(iiterator))
+    [idict[item] for item in train_dataset["asin"]]
+    train_dataset['iid'] = train_dataset['asin'].map(lambda x: idict[x])
+    test_dataset['asin'] = test_dataset['iid']
+    test_dataset['iid'] = test_dataset['asin'].map(lambda x: idict[x])
+    del train_dataset['asin']
+    del test_dataset['asin']
+
+    trainDF_to_tagged_documents(dataset_name=dataset_name, df=train_dataset, tiny=tiny)
+
     if tiny == True:
         with open(base_dir+'train_tiny.pkl', 'wb') as f_train_dataset:
             pickle.dump(train_dataset, f_train_dataset)
@@ -145,6 +204,7 @@ def split_dataset(dataset_name, df, tiny = False):
         with open(base_dir+'test.pkl', 'wb') as f_test_dataset:
             pickle.dump(test_dataset, f_test_dataset)
         f_test_dataset.close()
+    print(f'split dataset: done')
 
 
 if __name__ == '__main__':
@@ -153,12 +213,15 @@ if __name__ == '__main__':
                         help='choose the preprecess task to, choice:[preprocess, split]')
     parser.add_argument('--dataset', default='cell_phones_and_accessories', type=str, required=False, 
                         help='choose the dataset to preprocess, choice:[cell_phones_and_accessories, electronics, yelp]')
-    parser.add_argument('--tiny', default=False, type=bool, required=False, 
+    parser.add_argument('--tiny', action='store_true', 
                         help='Weather to generate a tiny version of dataset')
-    
+
+
     args = parser.parse_args()
     dataset_name = args.dataset
     if args.task == 'preprocess':
+        if not os.path.exists(dataset_name):
+            os.mkdir(dataset_name)
         preprocessor = Preprocessor(dataset_name, tiny=args.tiny)
 
     elif args.task == 'split':

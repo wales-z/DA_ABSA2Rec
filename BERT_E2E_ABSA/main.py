@@ -1,7 +1,7 @@
 import json
 import glob
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from tensorboardX import SummaryWriter
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
@@ -80,6 +80,8 @@ def init_args():
                             ALL_MODELS))
     parser.add_argument("--task_name", default=None, type=str, required=True,
                         help="The name of the task to train selected in the list: " + ", ".join(processors.keys()))
+    parser.add_argument("--rs_task_name", default=None, type=str, required=True,
+                        help="The name of the rs task to inference")
 
     # Other parameters
     parser.add_argument("--config_name", default="", type=str,
@@ -371,7 +373,7 @@ def evaluate(args, model, tokenizer, mode, prefix=""):
 
 
 def inference(args, inference_dataset, model, tokenizer, mode='inference', output_dir=None):
-
+    print(f'doing: inference')
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
     inference_sampler = SequentialSampler(inference_dataset)
@@ -384,24 +386,25 @@ def inference(args, inference_dataset, model, tokenizer, mode='inference', outpu
     preds = None
     out_label_ids = None
     crf_logits, crf_mask = [], []
-
+    label_list = ['O', 'EQ', 'B-POS', 'I-POS', 'E-POS', 'S-POS',
+            'B-NEG', 'I-NEG', 'E-NEG', 'S-NEG',
+            'B-NEU', 'I-NEU', 'E-NEU', 'S-NEU']
     def to_clean_sequence(s, mode='tag'):
         if mode == 'tag':
             for label in label_list:
                 s = s.replace('[CLS]='+label, '')
-            for label in label_list:
+                s = s.replace('[SEP]='+label, '')
                 s = s.replace('[PAD]='+label, '')
+                s = s.replace('"='+label, '') 
         elif mode == 'words':
             s = s.replace('[CLS]','')
+            s = s.replace('[SEP]','')
             s = s.replace('[PAD]','')
             s = s.replace('"','')
         else:
             raise Exception(f'Unexpected mode {mode}')
         s = s.strip()
         return s
-    label_list = ['O', 'EQ', 'B-POS', 'I-POS', 'E-POS', 'S-POS',
-            'B-NEG', 'I-NEG', 'E-NEG', 'S-NEG',
-            'B-NEU', 'I-NEU', 'E-NEU', 'S-NEU']
 
     label_map = {label: i for i, label in enumerate(
         label_list)}  # tag(str) to id(int)
@@ -458,7 +461,7 @@ def inference(args, inference_dataset, model, tokenizer, mode='inference', outpu
 
             output_file.writelines(tagged_reviews)
         output_file.close()
-
+    print(f'inference: done')
 
 def load_and_cache_examples(args, task, tokenizer, mode='train'):
     processor = processors[task]()
@@ -468,9 +471,16 @@ def load_and_cache_examples(args, task, tokenizer, mode='train'):
         list(filter(None, args.model_name_or_path.split('/'))).pop(),
         str(args.max_seq_length),
         str(task)))
+    if mode == 'inference':
+        cached_features_file = os.path.join(args.data_dir, 'cached_{}_{}_{}_{}'.format(
+            mode,
+            list(filter(None, args.model_name_or_path.split('/'))).pop(),
+            str(args.max_seq_length),
+            str(args.rs_task_name)))
     if os.path.exists(cached_features_file) and mode != 'inference':
         print("cached_features_file:", cached_features_file)
-        features = torch.load(cached_features_file)
+        with open(cached_features_file, 'rb') as f:
+            features = pickle.load(f)
     else:
         logger.info("Creating features from dataset file at %s", args.data_dir)
         label_list = processor.get_labels(args.tagging_schema)
@@ -516,7 +526,8 @@ def load_and_cache_examples(args, task, tokenizer, mode='train'):
                                                         mode='unlabeled')
     if args.local_rank in [-1, 0]:
         #logger.info("Saving features into cached file %s", cached_features_file)
-        torch.save(features, cached_features_file)
+        with open(cached_features_file, 'wb') as f:
+            pickle.dump(features, f)
 
     # Convert to Tensors and build dataset
     all_input_ids = torch.tensor(
@@ -536,8 +547,8 @@ def load_and_cache_examples(args, task, tokenizer, mode='train'):
     all_evaluate_label_ids = [f.evaluate_label_ids for f in features]
     return dataset, all_evaluate_label_ids
 
-
 def to_tagged_reviews_df(args, dataset_name, tiny = False):
+    print(f'doing: generate tagged reviews dataframe')
     if tiny == True:
         reviews_df_path = os.path.join(args.rs_data_dir, 'reviews_df_tiny.pkl')
         with open(reviews_df_path, 'rb') as f_reviews_df:
@@ -566,6 +577,7 @@ def to_tagged_reviews_df(args, dataset_name, tiny = False):
         output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews_df.pkl')
         with open(output_dir, 'wb') as f_tagged_reviews_df:
             pickle.dump(reviews_df, f_tagged_reviews_df)
+    print(f'generate tagged reviews dataframe: done')
 
 
 def main():
@@ -636,15 +648,14 @@ def main():
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
-    # # debuging codes
+    # # inference phase
     # inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
     #     args, args.task_name, tokenizer, mode='inference')
     # inference(args, inference_dataset, model, tokenizer)
 
-    # inference phase
-    # inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
-    #     args, args.task_name, tokenizer, mode='inference')
-    # inference(args, inference_dataset, model, tokenizer)
+    # # generate tagged reviews dataframe file
+    # dataset_name = 'cell_phones_and_accessories'
+    # to_tagged_reviews_df(args, dataset_name, tiny=True)
 
 
     # Training
@@ -745,15 +756,14 @@ def main():
     log_file.write('******************************************\n')
     log_file.close()
 
-    # # inference phase
-    # inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
-    #     args, args.task_name, tokenizer, mode='inference')
-    # inference(args, inference_dataset, model, tokenizer)
+    # inference phase
+    inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
+        args, args.task_name, tokenizer, mode='inference')
+    inference(args, inference_dataset, model, tokenizer)
 
-    # # generate tagged reviews dataframe file
-    # dataset_name = 'cell_phones_and_accessories'
-    # to_tagged_reviews_df(args, dataset_name, tiny=True)
-
+    # generate tagged reviews dataframe file
+    dataset_name = args.rs_task_name
+    to_tagged_reviews_df(args, dataset_name, tiny=False)
 
 if __name__ == '__main__':
     main()

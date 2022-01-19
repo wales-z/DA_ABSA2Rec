@@ -129,7 +129,7 @@ class ABSAProcessor(DataProcessor):
         else:
             raise Exception("Invalid tagging schema %s..." % tagging_schema)
 
-    def _create_examples(self, data_dir, set_type, tagging_schema, mode = 'labeled'):
+    def _create_examples(self, data_dir, set_type, tagging_schema, mode = 'labeled', tiny=False):
         if mode == 'labeled':
             examples = []
             file = os.path.join(data_dir, "%s.txt" % set_type)
@@ -181,11 +181,15 @@ class ABSAProcessor(DataProcessor):
                 s = s.replace(".",'')
                 s = s.replace("!",'')
                 s = s.replace("?",'')
+                s = s.replace('\"', '')
+                s = s.strip()
                 return s.split()
 
             examples = []
-            file = data_dir + '/reviews_tiny.txt'
-            # file = data_dir + '/reviews.txt'
+            file = data_dir + '/reviews.txt'
+            if tiny == True:
+                file = data_dir + '/reviews_tiny.txt'
+
             class_count = np.zeros(3)
             with open(file, 'r', encoding='UTF-8') as fp:
                 sample_id = 0

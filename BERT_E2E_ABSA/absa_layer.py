@@ -432,7 +432,7 @@ class BertABSATagger(BertPreTrainedModel):
         self.classifier = nn.Linear(penultimate_hidden_size, bert_config.num_labels)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None,
-                position_ids=None, head_mask=None):
+                position_ids=None, head_mask=None, fine_tune=False):
         outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
                             attention_mask=attention_mask, head_mask=head_mask)
         # the hidden states of the last Bert Layer, shape: (bsz, seq_len, hsz)
@@ -477,6 +477,9 @@ class BertABSATagger(BertPreTrainedModel):
                 log_likelihood = self.tagger(inputs=logits, tags=labels, mask=attention_mask)
                 loss = -log_likelihood
                 outputs = (loss,) + outputs
+        if fine_tune == True:
+            tagging_loss = outputs[0]
+            return tagging_loss
         return outputs, last_hidden_state
 
 

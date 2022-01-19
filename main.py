@@ -1,27 +1,27 @@
 import argparse
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 import torch
 import torch.nn as nn
 import logging
 import random
 import numpy as np
+import pickle
+import time
 
 from sklearn.model_selection import train_test_split
-from utils import convert_examples_to_seq_features, output_modes, processors
+from utils import ABSAProcessor
 from tqdm import tqdm, trange
-from transformers import BertConfig, BertTokenizer, XLNetConfig, XLNetTokenizer, WEIGHTS_NAME
+from transformers import BertConfig, BertTokenizer
 from transformers import AdamW, get_linear_schedule_with_warmup
-from models import BertABSATagger, DA_ABSA2Rec_ori, DA_ABSA2Rec
-from dataset import get_dataset
+from models import BertABSATagger, DA_ABSA2Rec_new, DA_ABSA2Rec
+from dataset import RecDataset
 
 from torch.utils.data import DataLoader, Dataset, TensorDataset, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 from tensorboardX import SummaryWriter
 
-import glob
-import json
 
 # print(torch.__version__) # 1.10.0+cu102
 # print(torch.version.cuda) # 10.2
@@ -88,8 +88,9 @@ def init_args():
                         help="Path to pre-trained model or shortcut name selected in the list: " + ", ".join(
                             ALL_MODELS))
     parser.add_argument("--task_name", default='cell_phones_and_accessories', type=str,
-                        help="The name of the task to train selected in the list: " + ", ".join(processors.keys()))
-
+                        help="The name of the task to train selected in the list:[]")
+    parser.add_argument('--tiny', action='store_true', 
+                        help='Weather to generate a tiny version of dataset')
     ## Other parameters
     parser.add_argument("--config_name", default="", type=str,
                         help="Pretrained config name or path if not the same as model_name")
@@ -105,14 +106,12 @@ def init_args():
     parser.add_argument("--do_lower_case", action='store_true',
                         help="Set this flag if you are using an uncased model.")
 
-    parser.add_argument("--per_gpu_train_batch_size", default=16, type=int,
+    parser.add_argument("--per_gpu_train_batch_size", default=64, type=int,
                         help="Batch size per GPU/CPU for training.")
-    parser.add_argument("--per_gpu_eval_batch_size", default=16, type=int,
+    parser.add_argument("--per_gpu_eval_batch_size", default=64, type=int,
                         help="Batch size per GPU/CPU for evaluation.")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                         help="Number of updates steps to accumulate before performing a backward/update pass.")
-    parser.add_argument("--fine_tune_learning_rate", default=5e-5, type=float,
-                        help="The initial learning rate for Adam.")
     parser.add_argument("--learning_rate", default=1e-3, type=float,
                         help="The initial learning rate for Adam.")
     parser.add_argument("--weight_decay", default=1e-5, type=float,
@@ -163,152 +162,6 @@ def init_args():
     args.output_dir = output_dir
     return args
 
-def train_and_eval(args, train_dataset, eval_dataset, model, tokenizer):
-    # training phase
-    if args.local_rank in [-1, 0]:
-        tb_writer = SummaryWriter()
-
-    args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
-
-    if args.max_steps > 0:
-        t_total = args.max_steps
-        args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
-    else:
-        t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
-
-    # Prepare optimizer and schedule (linear warmup and decay)
-    no_decay = ['bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
-        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
-
-    global_step = 0
-    tr_loss, logging_loss = 0.0, 0.0
-    model.zero_grad()
-    train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
-    # set the seed number
-    set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
-
-    loss_func = nn.MSELoss()
-
-    for epoch_index in train_iterator:
-        epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-        for step, batch in enumerate(epoch_iterator):
-            train_loss = []
-            model.train()
-            batch = tuple(t.to(args.device) for t in batch)
-            label_ratings = batch[4]
-            inputs = {
-                'input_ids':      batch[0],
-                'attention_mask': batch[1],
-                # XLM don't use segment_ids
-                'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-                'tagging_labels': batch[3],
-                'uids':           batch[5],
-                'iids':           batch[6]}
-            predicted_ratings, tagging_loss = model(**inputs)
-            rating_loss = loss_func(predicted_ratings, label_ratings)
-            train_loss.append(rating_loss)
-
-            loss = rating_loss + tagging_loss/len(tagging_loss)
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-
-            tr_loss += rating_loss.item()
-            if (step + 1) % args.gradient_accumulation_steps == 0:
-                optimizer.step()
-                scheduler.step()  # Update learning rate schedule
-                model.zero_grad()
-                global_step += 1
-
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    # Log metrics
-                    # Only evaluate when single GPU otherwise metrics may not average well
-                    if args.local_rank == -1 and args.evaluate_during_training:
-                        results = evaluate(args, model, tokenizer)
-                        for key, value in results.items():
-                            tb_writer.add_scalar(
-                                'eval_{}'.format(key), value, global_step)
-                    tb_writer.add_scalar(
-                        'lr', scheduler.get_lr()[0], global_step)
-                    tb_writer.add_scalar(
-                        'loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
-                    logging_loss = tr_loss
-
-                if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
-                    # Save model checkpoint per each N steps
-                    output_dir = os.path.join(
-                        args.output_dir, 'checkpoint-{}'.format(global_step))
-                    if not os.path.exists(output_dir):
-                        os.makedirs(output_dir)
-                    # Take care of distributed/parallel training
-                    model_to_save = model.module if hasattr(
-                        model, 'module') else model
-                    model_to_save.save_pretrained(output_dir)
-                    torch.save(args, os.path.join(
-                        output_dir, 'training_args.bin'))
-                    logger.info("Saving model checkpoint to %s", output_dir)
-
-            if args.max_steps > 0 and global_step > args.max_steps:
-                epoch_iterator.close()
-                break
-        if args.max_steps > 0 and global_step > args.max_steps:
-            train_iterator.close()
-            break
-        train_average_mse = np.mean(np.array(train_loss))
-        print(f'epoch {epoch_index}, train mse: {train_average_mse}')
-
-    if args.local_rank in [-1, 0]:
-        tb_writer.close()
-
-    # eval phase
-    eval_task_names = (args.task_name,)
-    eval_outputs_dirs = (args.output_dir,)
-
-    for eval_task, eval_output_dir in zip(eval_task_names, eval_outputs_dirs):
-        eval_dataset, eval_evaluate_label_ids = get_dataset(args, eval_task, tokenizer)
-
-        if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
-            os.makedirs(eval_output_dir)
-
-        # args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
-        args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
-        # Note that DistributedSampler samples randomly
-        eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
-        eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
-        eval_loss = []
-        for batch in tqdm(eval_dataloader, desc="Evaluating"):
-            model.eval()
-            batch = tuple(t.to(args.device) for t in batch)
-
-            with torch.no_grad():
-                label_ratings = batch[4]
-                inputs = {
-                    'input_ids':      batch[0],
-                    'attention_mask': batch[1],
-                    # XLM don't use segment_ids
-                    'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-                    'tagging_labels':         batch[3],
-                    'uids':           batch[5],
-                    'iids':           batch[6]}
-                predicted_ratings, _ = model(**inputs)
-                rating_loss = loss_func(predicted_ratings, label_ratings)
-                eval_loss.append(rating_loss)
-
-        test_average_mse = np.mean(np.array(train_loss))
-        print(f'epoch {epoch_index}, mse: {test_average_mse}')
-
-
-def test():
-    # test phase
-    pass
-
 
 def main():
     args = init_args()
@@ -338,7 +191,7 @@ def main():
     set_seed(args)
 
     # initialize the pre-trained model
-    processor = processors[args.task_name]()
+    processor = ABSAProcessor(data_dir=args.data_dir, task_name=args.task_name, tiny=args.tiny)
     label_list = processor.get_labels(args.tagging_schema)
     num_labels = len(label_list)
 
@@ -356,7 +209,9 @@ def main():
     # Distributed and parallel training
     # model = DA_ABSA2Rec(args, config, num_users=Dataset_configs[args.task_name][0], num_items=Dataset_configs[args.task_name][1])
     # model = DA_ABSA2Rec(args, config, num_users=27845, num_items=10429)
-    model = DA_ABSA2Rec(args, config, num_users=814, num_items=1370)
+    model = DA_ABSA2Rec(args, num_users=1484, num_items=1840)
+    # model = DA_ABSA2Rec_new(args, num_users=1484, num_items=1840)
+
     model.to(args.device)
     if args.local_rank != -1:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
@@ -365,96 +220,44 @@ def main():
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
-    train_dataset, train_evaluate_label_ids = get_dataset(args, logger, args.task_name, tokenizer, mode='train', tiny=True)
-    test_dataset, test_evaluate_label_ids = get_dataset(args, logger, args.task_name, tokenizer, mode='test', tiny=True)
-    # train_and_eval(args, train_dataset, eval_dataset, model, tokenizer)
+    uemb_path = os.path.join(args.data_dir, args.task_name, 'user_emb.pkl')
+    iemb_path = os.path.join(args.data_dir, args.task_name, 'item_emb.pkl')
+    train_df_path = os.path.join(args.data_dir, args.task_name, 'tagged_reviews_df_train.pkl')
+    test_df_path = os.path.join(args.data_dir, args.task_name, 'tagged_reviews_df_test.pkl')
+    if args.tiny==True:
+        uemb_path = os.path.join(args.data_dir, args.task_name, 'user_emb_tiny.pkl')
+        iemb_path = os.path.join(args.data_dir, args.task_name, 'item_emb_tiny.pkl')
+        train_df_path = os.path.join(args.data_dir, args.task_name, 'tagged_reviews_df_train_tiny.pkl')
+        test_df_path = os.path.join(args.data_dir, args.task_name, 'tagged_reviews_df_test_tiny.pkl')
 
-    # debugging codes
+    with open(uemb_path, 'rb') as f2:
+        user_emb_dict = pickle.load(f2)
+    with open(iemb_path, 'rb') as f3:
+        item_emb_dict = pickle.load(f3)
 
+    with open(train_df_path, 'rb') as f_train:
+        train_df = pickle.load(f_train)
+    train_dataset = RecDataset(train_df, user_emb_dict, item_emb_dict)
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=8, pin_memory=True)
 
+    with open(test_df_path, 'rb') as f_test:
+        test_df = pickle.load(f_test)
+    test_dataset = RecDataset(test_df, user_emb_dict, item_emb_dict)
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     test_sampler = SequentialSampler(test_dataset) if args.local_rank == -1 else DistributedSampler(test_dataset)
-    test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=args.eval_batch_size)
+    test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=args.eval_batch_size, num_workers=8, pin_memory=True)
 
-
-    if args.max_steps > 0:
-        t_total = args.max_steps
-        args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
-    else:
-        t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
-
-    # Prepare optimizer and schedule (linear warmup and decay)
-    no_decay = ['bias', 'LayerNorm.weight']
-
-    bert_absa_parameters = [child for cnt, child in enumerate(model.children()) if cnt==0]
-    bert_absa_parameters = bert_absa_parameters[0]
-    bert_absa_parameters = [
-        {'params': [p for n, p in bert_absa_parameters.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
-        {'params': [p for n, p in bert_absa_parameters.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-
-
-    # optimizer_grouped_parameters = [
-    #     {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
-    #     {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    #     ]
-    fine_tune_optimizer = torch.optim.AdamW(bert_absa_parameters, lr=args.fine_tune_learning_rate, eps=args.adam_epsilon)
-
-    # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
-    fine_tune_scheduler = get_linear_schedule_with_warmup(fine_tune_optimizer, num_warmup_steps=0, num_training_steps=t_total)
-
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.2, patience=10)
-    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4, gamma=0.5)
-    
     if args.local_rank in [-1, 0]:
-        tb_writer = SummaryWriter()
+        current_time = time.strftime("%Y-%m-%dT%H:%M", time.localtime())
+        tb_writer = SummaryWriter(log_dir=os.path.join('log', current_time))
 
-    global_step = 0
-    model.zero_grad()
-    # train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
-    # set the seed number
-    set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
-    fine_tune_epochs = 3
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.weight_decay)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=1*len(train_dataloader), num_training_steps=15*len(train_dataloader))
 
-    for epoch_index in range(fine_tune_epochs):
-        fine_tune_loss = []
-        for step, batch in enumerate(train_dataloader):
-            model.train()
-            batch = tuple(t.to(args.device) for t in batch)
-            label_ratings = batch[4]
-            inputs = {
-                'input_ids':      batch[0],
-                'attention_mask': batch[1],
-                # XLM don't use segment_ids
-                'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-                'tagging_labels': batch[3],
-                'uids':           batch[5],
-                'iids':           batch[6]
-            }
-            tagging_loss = model(**inputs, fine_tune = True)
-            if args.n_gpu > 1:
-                tagging_loss = tagging_loss.mean()  # mean() to average on multi-gpu parallel training
-            fine_tune_loss.append(tagging_loss)
-            tagging_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-
-            fine_tune_optimizer.step()
-            fine_tune_scheduler.step()  # Update learning rate schedule
-            model.zero_grad()
-        fine_tune_average_loss = torch.mean(torch.stack(fine_tune_loss))
-        print(f'epoch {epoch_index}, tagging loss: {fine_tune_average_loss}')
-
-    for name, param in model.named_parameters():
-        if ('bertABSATagger' in name):
-            param.requires_grad = False
-
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.weight_decay)
-    # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=1*len(train_dataloader), num_training_steps=9*len(train_dataloader))
-
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1*len(train_dataloader), gamma=0.9)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2*len(train_dataloader), gamma=0.9)
 
     get_mse = nn.MSELoss()
     # loss_func = nn.L1Loss()
@@ -463,21 +266,22 @@ def main():
     # epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         # train phase
         train_loss = []
-        for step, batch in enumerate(train_dataloader):
+        for batch in train_dataloader:
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
-            label_ratings = batch[4]
-            inputs = {
-                'input_ids':      batch[0],
-                'attention_mask': batch[1],
-                # XLM don't use segment_ids
-                'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-                'tagging_labels': batch[3],
-                'uids':           batch[5],
-                'iids':           batch[6]
-            }
-            predicted_ratings= model(**inputs, fine_tune = False)
 
+            label_ratings = batch[6].to(torch.float32)
+            inputs = {
+                'uid':          batch[0],
+                'user_emb':     batch[1],
+                'user_logits':  batch[2],
+                'iid':          batch[3],
+                'item_emb':     batch[4],
+                'item_logits':  batch[5]
+            }
+            predicted_ratings = model(**inputs)
+
+            # rating_loss = 0.7*loss_func(predicted_ratings, label_ratings) + 0.3*loss_func(sentiment_ratings, label_ratings)
             rating_loss = loss_func(predicted_ratings, label_ratings)
             mse_loss = get_mse(predicted_ratings, label_ratings)
             if args.n_gpu > 1:
@@ -485,41 +289,31 @@ def main():
 
             train_loss.append(mse_loss)
             rating_loss.backward()
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
-            # if (step + 1) % args.gradient_accumulation_steps == 0:
             optimizer.step()
             scheduler.step()  # Update learning rate schedule
             model.zero_grad()
-            global_step += 1
 
-            if args.max_steps > 0 and global_step > args.max_steps:
-                epoch_iterator.close()
-                break
-        if args.max_steps > 0 and global_step > args.max_steps:
-            train_iterator.close()
-            break
         train_average_mse = torch.mean(torch.stack(train_loss))
-        tb_writer.add_scalar('Train/mse', train_average_mse, epoch_index)
+        tb_writer.add_scalar('Train/mse', train_average_mse.item(), epoch_index)
         tb_writer.add_scalar('learning_rate', scheduler.get_last_lr()[0], epoch_index)
-        
+
         # test phase
         test_loss = []
-        for step, batch in enumerate(test_dataloader):
+        for batch in test_dataloader:
             model.eval()
             batch = tuple(t.to(args.device) for t in batch)
             with torch.no_grad():
-                label_ratings = batch[4]
+                label_ratings = batch[6].to(torch.float32)
                 inputs = {
-                    'input_ids':      batch[0],
-                    'attention_mask': batch[1],
-                    # XLM don't use segment_ids
-                    'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-                    'tagging_labels': batch[3],
-                    'uids':           batch[5],
-                    'iids':           batch[6]
+                    'uid':          batch[0],
+                    'user_emb':     batch[1],
+                    'user_logits':  batch[2],
+                    'iid':          batch[3],
+                    'item_emb':     batch[4],
+                    'item_logits':  batch[5]
                 }
-                predicted_ratings = model(**inputs, fine_tune = False)
+                predicted_ratings  = model(**inputs)
 
             rating_loss = loss_func(predicted_ratings, label_ratings)
             mse_loss = get_mse(predicted_ratings, label_ratings)
@@ -529,8 +323,9 @@ def main():
             test_loss.append(mse_loss)
 
         test_average_mse = torch.mean(torch.stack(test_loss))
-        tb_writer.add_scalar('test/mse', test_average_mse, epoch_index)
+        tb_writer.add_scalar('test/mse', test_average_mse.item(), epoch_index)
         print(f'epoch {epoch_index}, train mse: {train_average_mse}, test mse: {test_average_mse}')
+
     if args.local_rank in [-1, 0]:
         tb_writer.close()
 

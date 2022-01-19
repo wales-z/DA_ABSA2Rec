@@ -5,16 +5,18 @@ In our experiment, we choose Amazon reviews 5-core "Electornics", "Cell Phones a
 Some basic Information for the dataset we use.
 ## 1 Amazon reviews 5-core
 ### 1.1 Electronics
-
+user num: 192253
+item num: 63001
+review/rating num: 1687517 
 ### 1.2 Cell Phones and Accessories
 user num: 27845
 item num: 10429
 review/rating num: 194204 
 
-> tiny version: (choose former 50000 and filter out users with at least 5 interactions)
-> user num: 1484
-> item num: 1988
-> review/rating num: 9146 
+> tiny version: (choose former 30000 / 50000 and filter out users with at least 5 interactions)
+> user num: 814 / 1484
+> item num: 1370 / 1988
+> review/rating num: 4909 / 9146 
 
 ## 2 Yelp reviews
 original: 
