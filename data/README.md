@@ -19,8 +19,16 @@ review/rating num: 194204
 > review/rating num: 4909 / 9146 
 
 ## 2 Yelp reviews
-original: 
+yelp数据集提供了3个对评论质量进行评价的维度并由用户自行评价（类似对评论点赞、点踩）：userful, funny, cool（以下都是 review 数量）
+original: 8635403 
 when filtering with useful>0: 3877235
 when filtering with funny>0: 1596435
-when filtering with funny>0: 1948423 
-when filtering with all conditions above: 954713 
+when filtering with cool>0: 1948423
+when filtering with useful>0 & cool>0: 1679558
+when filtering with all 3 conditions above: 954713
+
+when filtering with 5-core setting: 5766970
+when filtering with 10-core setting: 4219140
+
+when filtering with 5-core & useful>0: 2334990
+when filtering with 5-core & useful>0 & cool>0: 1005090

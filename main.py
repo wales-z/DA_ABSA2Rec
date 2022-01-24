@@ -1,6 +1,5 @@
 import argparse
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 import torch
 import torch.nn as nn
 import logging
@@ -9,7 +8,7 @@ import numpy as np
 import pickle
 import time
 
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from utils import ABSAProcessor
 from tqdm import tqdm, trange
 from transformers import BertConfig, BertTokenizer
@@ -116,6 +115,8 @@ def init_args():
                         help="The initial learning rate for Adam.")
     parser.add_argument("--weight_decay", default=1e-5, type=float,
                         help="Weight deay if we apply some.")
+    parser.add_argument("--scheduler_gamma", default=0.9, type=float,
+                        help="the multiplier for learning rate scheduler")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float,
                         help="Epsilon for Adam optimizer.")
     parser.add_argument("--max_grad_norm", default=1.0, type=float,
@@ -208,8 +209,8 @@ def main():
 
     # Distributed and parallel training
     # model = DA_ABSA2Rec(args, config, num_users=Dataset_configs[args.task_name][0], num_items=Dataset_configs[args.task_name][1])
-    # model = DA_ABSA2Rec(args, config, num_users=27845, num_items=10429)
-    model = DA_ABSA2Rec(args, num_users=1484, num_items=1840)
+    model = DA_ABSA2Rec(args, num_users=27845, num_items=10429)
+    # model = DA_ABSA2Rec(args, num_users=1484, num_items=1840)
     # model = DA_ABSA2Rec_new(args, num_users=1484, num_items=1840)
 
     model.to(args.device)
@@ -222,11 +223,15 @@ def main():
 
     uemb_path = os.path.join(args.data_dir, args.task_name, 'user_emb.pkl')
     iemb_path = os.path.join(args.data_dir, args.task_name, 'item_emb.pkl')
+    ufeature_path = os.path.join(args.data_dir, args.task_name, 'cached_user_bert-base-uncased_512_cell_phones_and_accessories')
+    ifeature_path = os.path.join(args.data_dir, args.task_name, 'cached_item_bert-base-uncased_512_cell_phones_and_accessories')
     train_df_path = os.path.join(args.data_dir, args.task_name, 'tagged_reviews_df_train.pkl')
     test_df_path = os.path.join(args.data_dir, args.task_name, 'tagged_reviews_df_test.pkl')
     if args.tiny==True:
         uemb_path = os.path.join(args.data_dir, args.task_name, 'user_emb_tiny.pkl')
         iemb_path = os.path.join(args.data_dir, args.task_name, 'item_emb_tiny.pkl')
+        ufeature_path = os.path.join(args.data_dir, args.task_name, 'cached_user_bert-base-uncased_512_cell_phones_and_accessories_tiny')
+        ifeature_path = os.path.join(args.data_dir, args.task_name, 'cached_item_bert-base-uncased_512_cell_phones_and_accessories_tiny')
         train_df_path = os.path.join(args.data_dir, args.task_name, 'tagged_reviews_df_train_tiny.pkl')
         test_df_path = os.path.join(args.data_dir, args.task_name, 'tagged_reviews_df_test_tiny.pkl')
 
@@ -234,43 +239,62 @@ def main():
         user_emb_dict = pickle.load(f2)
     with open(iemb_path, 'rb') as f3:
         item_emb_dict = pickle.load(f3)
+    with open(ufeature_path, 'rb') as f4:
+        user_features_dict = pickle.load(f4)
+    with open(ifeature_path, 'rb') as f5:
+        item_features_dict = pickle.load(f5)
 
     with open(train_df_path, 'rb') as f_train:
         train_df = pickle.load(f_train)
-    train_dataset = RecDataset(train_df, user_emb_dict, item_emb_dict)
+    train_dataset = RecDataset(train_df, user_emb_dict, item_emb_dict, user_features_dict, item_features_dict)
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=8, pin_memory=True)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=20, pin_memory=True)
 
     with open(test_df_path, 'rb') as f_test:
         test_df = pickle.load(f_test)
-    test_dataset = RecDataset(test_df, user_emb_dict, item_emb_dict)
+    test_dataset = RecDataset(test_df, user_emb_dict, item_emb_dict, user_features_dict, item_features_dict)
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     test_sampler = SequentialSampler(test_dataset) if args.local_rank == -1 else DistributedSampler(test_dataset)
-    test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=args.eval_batch_size, num_workers=8, pin_memory=True)
+    test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=args.eval_batch_size, num_workers=20, pin_memory=True)
 
     if args.local_rank in [-1, 0]:
         current_time = time.strftime("%Y-%m-%dT%H:%M", time.localtime())
         tb_writer = SummaryWriter(log_dir=os.path.join('log', current_time))
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.weight_decay)
+    param = {}
+    param_s = {}
+    for n, p in model.named_parameters():
+        if 'concat_to_1_s' in n:
+            param_s[n]=p
+        else:
+            param[n]=p
+
+    optimizer = torch.optim.AdamW(param.values(), lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.weight_decay)
+    optimizer_s = torch.optim.AdamW(param_s.values(), lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.weight_decay)
     # optimizer = torch.optim.SGD(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=1*len(train_dataloader), num_training_steps=15*len(train_dataloader))
 
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2*len(train_dataloader), gamma=0.9)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1*len(train_dataloader), gamma=0.9)
+    scheduler_s = torch.optim.lr_scheduler.StepLR(optimizer_s, step_size=1*len(train_dataloader), gamma=0.9)
 
     get_mse = nn.MSELoss()
     # loss_func = nn.L1Loss()
     loss_func = nn.MSELoss()
+
+    print(f'start training, batch size: {args.per_gpu_train_batch_size}, learning rate: {args.learning_rate}')
+
     for epoch_index in range(int(args.num_train_epochs)):
     # epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         # train phase
-        train_loss = []
-        for batch in train_dataloader:
+        all_rating_pred = []
+        all_rating_true = []
+        for step, batch in enumerate(train_dataloader):
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
 
             label_ratings = batch[6].to(torch.float32)
+            all_rating_true.extend(label_ratings.cpu().numpy())
             inputs = {
                 'uid':          batch[0],
                 'user_emb':     batch[1],
@@ -279,32 +303,40 @@ def main():
                 'item_emb':     batch[4],
                 'item_logits':  batch[5]
             }
-            predicted_ratings = model(**inputs)
+            predicted_ratings, sentiment_ratings, u, i = model(**inputs)
+            all_rating_pred.extend(predicted_ratings.data)
+            # 系数范围 [0.1, 1, 10]
+            # rating_loss = loss_func(sentiment_ratings, label_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
+            rating_loss = loss_func(predicted_ratings, label_ratings) + 10*loss_func(sentiment_ratings, predicted_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
+            # rating_loss = loss_func(predicted_ratings, label_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
 
-            # rating_loss = 0.7*loss_func(predicted_ratings, label_ratings) + 0.3*loss_func(sentiment_ratings, label_ratings)
-            rating_loss = loss_func(predicted_ratings, label_ratings)
-            mse_loss = get_mse(predicted_ratings, label_ratings)
             if args.n_gpu > 1:
                 rating_loss = rating_loss.mean()
 
-            train_loss.append(mse_loss)
             rating_loss.backward()
 
-            optimizer.step()
-            scheduler.step()  # Update learning rate schedule
+            if step%2==0 :
+                optimizer.step()
+                scheduler.step()
+            else:
+                optimizer_s.step()
+                scheduler_s.step()
+              # Update learning rate schedule
             model.zero_grad()
 
-        train_average_mse = torch.mean(torch.stack(train_loss))
-        tb_writer.add_scalar('Train/mse', train_average_mse.item(), epoch_index)
+        train_average_mse = mean_squared_error(np.array(all_rating_true), np.array(all_rating_pred))
+        tb_writer.add_scalar('Train/mse', train_average_mse, epoch_index)
         tb_writer.add_scalar('learning_rate', scheduler.get_last_lr()[0], epoch_index)
 
         # test phase
-        test_loss = []
+        all_rating_pred = []
+        all_rating_true = []
         for batch in test_dataloader:
             model.eval()
             batch = tuple(t.to(args.device) for t in batch)
             with torch.no_grad():
                 label_ratings = batch[6].to(torch.float32)
+                all_rating_true.extend(label_ratings)
                 inputs = {
                     'uid':          batch[0],
                     'user_emb':     batch[1],
@@ -313,17 +345,15 @@ def main():
                     'item_emb':     batch[4],
                     'item_logits':  batch[5]
                 }
-                predicted_ratings  = model(**inputs)
+                predicted_ratings, sentiment_ratings, u, i = model(**inputs)
+                all_rating_pred.extend(predicted_ratings.data)
 
             rating_loss = loss_func(predicted_ratings, label_ratings)
-            mse_loss = get_mse(predicted_ratings, label_ratings)
             if args.n_gpu > 1:
                 rating_loss = rating_loss.mean()
 
-            test_loss.append(mse_loss)
-
-        test_average_mse = torch.mean(torch.stack(test_loss))
-        tb_writer.add_scalar('test/mse', test_average_mse.item(), epoch_index)
+        test_average_mse = mean_squared_error(np.array(all_rating_true), np.array(all_rating_pred))
+        tb_writer.add_scalar('test/mse', test_average_mse, epoch_index)
         print(f'epoch {epoch_index}, train mse: {train_average_mse}, test mse: {test_average_mse}')
 
     if args.local_rank in [-1, 0]:

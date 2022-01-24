@@ -594,7 +594,7 @@ class DA_ABSA2Rec_linear(nn.Module):
         # shape(num_aspects, batch_size, seq_len, reduced_embedding_size)
         return aspect_specific_embeddings
 
-    def sentiment_aware_attention(self, aspect_specific_embeddings, tagging_logits, valid_seq_len):
+    def sentiment_aware_attention(self, aspect_specific_embeddings, tagging_logits, valid_seq_len=None):
         # tagging_logits.shape: (batch_size, seq_len, 14)
         # valid_seq_len.shape: (batch_size)
         # sentiment_score.shape:  (batch_size, seq_len, 1)
@@ -602,15 +602,18 @@ class DA_ABSA2Rec_linear(nn.Module):
         sentiment_score = self.to_sentiment_score(tagging_logits)
         sentiment_attention = nn.functional.softmax(
             sentiment_score, dim=-1)  # shape:  (batch_size, seq_len, 1)
-        
-        for temp_aspect_specific_embedding in aspect_specific_embeddings:
-            temp_aspect_specific_embedding = sentiment_attention * temp_aspect_specific_embedding
 
-        # shape (num_aspects, batch_size, reduced_embedding_size) 所有位置的embedding加起来，融合成一个位置长度的 embedding
+        for i in range(len(aspect_specific_embeddings)):
+            aspect_specific_embeddings[i] = sentiment_attention * aspect_specific_embeddings[i]
+
+        # 所有位置的embedding加起来，融合成一个位置长度的 embedding
         sentiment_aware_embeddings = [] # list of len num_aspects, with each element shape:(batch_size, redueced_embedding_size)
         for temp_aspect_specific_embedding in aspect_specific_embeddings:
-            temp_sentiment_aware_embedding = torch.sum(temp_aspect_specific_embedding, dim=2) / valid_seq_len
+            # temp_sentiment_aware_embedding = torch.sum(temp_aspect_specific_embedding, dim=2) / valid_seq_len
+            temp_sentiment_aware_embedding = torch.sum(temp_aspect_specific_embedding, dim=2)
             sentiment_aware_embeddings.append(temp_sentiment_aware_embedding)
+
+        # shape (num_aspects, batch_size, reduced_embedding_size) 
         sentiment_aware_embeddings = torch.stack(sentiment_aware_embeddings)
 
         return sentiment_aware_embeddings
@@ -653,17 +656,26 @@ class DA_ABSA2Rec_linear(nn.Module):
 
 
 class DA_ABSA2Rec(nn.Module):
-    def __init__(self, args, num_users, num_items, max_sequence_length=512, ori_embedding_size=768, reduced_embedding_size=192, num_aspects=5):
+    def __init__(self, args, num_users, num_items, max_sequence_length=512, ori_embedding_size=768, reduced_embedding_size=128, h2=50, num_aspects=5):
         super(DA_ABSA2Rec, self).__init__()
         self.args = args
         self.max_sequence_length = max_sequence_length
         self.ori_embedding_size = ori_embedding_size
         self.reduced_embedding_size = reduced_embedding_size
+        self.num_aspects = num_aspects
+        self.h2 = h2
 
         self.user_bias = nn.Embedding(num_users, 1)
         self.item_bias = nn.Embedding(num_items, 1)
-        self.user_bias.weight.data.normal_(0, 0.1)  # 初始化 user 偏置
-        self.user_bias.weight.data.normal_(0, 0.1)  # 初始化 item 偏置
+        # self.user_bias.weight.data.normal_(0, 0.01)  # 初始化 user 偏置
+        # self.item_bias.weight.data.normal_(0, 0.01)  # 初始化 item 偏置
+        self.user_bias.weight.data.uniform_(-0.01, 0.01)  # 初始化 user 偏置
+        self.item_bias.weight.data.uniform_(-0.01, 0.01)  # 初始化 item 偏置
+
+        self.aspect_categorys = nn.Embedding(
+            num_aspects, reduced_embedding_size)
+        self.aspect_categorys.weight.data.normal_(
+            0, 0.01)
 
         # 将tagging logits 转为情感注意力
         self.to_sentiment_score = nn.Sequential(
@@ -671,76 +683,194 @@ class DA_ABSA2Rec(nn.Module):
             nn.Sigmoid()
         )
         self.pooler = nn.AdaptiveMaxPool1d(reduced_embedding_size)
-        # self.to_sentiment_score[0].weight.data = torch.tensor([[0.0, 0.0, 0.25, 0.25, 0.25, 0.25, 0.0, 0.0, 0.0, 0.0, -0.25, -0.25, -0.25, -0.25]], dtype=torch.float32, device=args.device)
+        self.pooler = nn.AdaptiveAvgPool1d(reduced_embedding_size)
+        self.to_sentiment_score[0].weight.data = torch.tensor([[0.0, 0.0, 0.25, 0.25, 0.25, 0.25, 0.0, 0.0, 0.0, 0.0, -0.25, -0.25, -0.25, -0.25]], dtype=torch.float32, device=args.device)
+        nn.init.constant_(self.to_sentiment_score[0].bias, 0)
         # self.to_sentiment_score = nn.Sequential(
         #     nn.Linear(in_features=14, out_features=14*self.num_aspects),
         #     nn.Dropout(0.1),
+        #     nn.Sigmoid(),
         #     nn.Linear(in_features=14*self.num_aspects, out_features=14),
         #     nn.Dropout(0.1),
+        #     nn.Sigmoid(),
         #     nn.Linear(in_features=14, out_features=1),
         #     nn.LeakyReLU()
         # )
+        # nn.init.xavier_normal_(self.to_sentiment_score[0].weight)
+        # nn.init.constant_(self.to_sentiment_score[0].bias, 0)
+        # nn.init.xavier_normal_(self.to_sentiment_score[3].weight)
+        # nn.init.constant_(self.to_sentiment_score[3].bias, 0)
+        # nn.init.xavier_normal_(self.to_sentiment_score[6].weight)
+        # nn.init.constant_(self.to_sentiment_score[6].bias, 0)
 
         self.to_reduced = nn.Sequential(
             nn.Linear(ori_embedding_size, reduced_embedding_size),
-            nn.BatchNorm1d(self.max_sequence_length)
-            # nn.Dropout(0.5)
+            # nn.BatchNorm1d(self.max_sequence_length)
+            nn.Dropout(0.5),
+            nn.Sigmoid()
         )
         nn.init.xavier_normal_(self.to_reduced[0].weight)
+        # nn.init.uniform_(self.to_reduced[0].weight, -0.01, 0.01)
         nn.init.constant_(self.to_reduced[0].bias, 0)
 
         # self.ori_to_1 = nn.Linear(ori_embedding_size, 1)
         self.redueced_to_1 = nn.Sequential(
             nn.Linear(reduced_embedding_size, 1),
-            nn.BatchNorm1d(self.max_sequence_length)
-            # nn.Dropout(0.5)
+            # nn.BatchNorm1d(self.max_sequence_length)
+            nn.Dropout(0.5)
         )
         nn.init.xavier_normal_(self.redueced_to_1[0].weight)
+        # nn.init.uniform_(self.redueced_to_1[0].weight, -0.01, 0.01)
         nn.init.constant_(self.redueced_to_1[0].bias, 0)
 
         self.position_to_1 = nn.Sequential(
             nn.Linear(max_sequence_length, 1),
         )
         nn.init.xavier_normal_(self.position_to_1[0].weight)
+        # nn.init.uniform_(self.position_to_1[0].weight, -0.01, 0.01)
         nn.init.constant_(self.position_to_1[0].bias, 0)
 
         self.concat_to_1 = nn.Sequential(
-            nn.Linear(2*self.reduced_embedding_size, 1),
+            # nn.Linear(2*self.reduced_embedding_size, 4*reduced_embedding_size),
+            # nn.Dropout(0.5),
+            # nn.Sigmoid(),
+            # nn.Linear(4*reduced_embedding_size, 2*reduced_embedding_size),
+            # nn.Dropout(0.5),
+            # nn.Sigmoid(),
+            nn.Linear(2*reduced_embedding_size, 1),
+            nn.Sigmoid(),
             # nn.BatchNorm1d(1)
         )
         nn.init.xavier_normal_(self.concat_to_1[0].weight)
+        # nn.init.uniform_(self.concat_to_1[0].weight, -0.01, 0.01)
         nn.init.constant_(self.concat_to_1[0].bias, 0)
+        # nn.init.xavier_normal_(self.concat_to_1[3].weight)
+        # nn.init.constant_(self.concat_to_1[3].bias, 0)
+        # nn.init.xavier_normal_(self.concat_to_1[6].weight)
+        # nn.init.constant_(self.concat_to_1[6].bias, 0)
 
+        self.concat_to_1_s = nn.Sequential(
+            nn.Linear(2*14, 1),
+            nn.Sigmoid()
+        )
+        nn.init.xavier_normal_(self.concat_to_1_s[0].weight)
+        # nn.init.uniform_(self.concat_to_1_s[0].weight, -0.01, 0.01)
+        nn.init.constant_(self.concat_to_1_s[0].bias, 0)
 
-    def forward(self, uid, user_emb, user_logits, iid, item_emb, item_logits):
-        # shape: (batch_size, seq_len, 1)
-        self.u_sentiment_attention = nn.functional.softmax(self.to_sentiment_score(nn.functional.softmax(user_logits, dim=-1)), dim=-1)
-        self.i_sentiment_attention = nn.functional.softmax(self.to_sentiment_score(nn.functional.softmax(item_logits, dim=-1)), dim=-1)
-        # shape: (batch_size, seq_len, reduced_embedding_size)
-        # user_output = torch.sigmoid(self.to_reduced(user_emb))
-        # item_output = torch.sigmoid(self.to_reduced(item_emb))
-        self.user_emb = user_emb
-        self.item_emb = item_emb
-        # self.user_output0 = self.pooler(user_emb)
-        # self.item_output0 = self.pooler(item_emb)
-        self.user_output0 = self.to_reduced(user_emb)
-        self.item_output0 = self.to_reduced(item_emb)
+        # # below are weight matrix/vectors needed for ANR's rating prediction method 
+        # self.W_a = nn.Parameter(torch.Tensor(self.num_aspects, self.num_aspects), requires_grad = True)
+        # self.W_s = nn.Parameter(torch.Tensor(self.reduced_embedding_size, self.reduced_embedding_size), requires_grad = True)
+        # self.W_s.data.normal_(0, 0.01)
 
-        # shape: (batch_size, seq_len)
-        # output = torch.sigmoid(self.redueced_to_1(output)).squeeze() * sentiment_attention
+        # self.W_u = nn.Parameter(torch.Tensor(self.reduced_embedding_size, self.h2), requires_grad=True)
+        # self.w_hu = nn.Parameter(torch.Tensor(self.h2, 1), requires_grad = True)
+        # self.W_i = nn.Parameter(torch.Tensor(self.reduced_embedding_size, self.h2), requires_grad=True)
+        # self.w_hi = nn.Parameter(torch.Tensor(self.h2, 1), requires_grad = True)
 
-        self.user_output = torch.tanh(torch.sum(self.user_output0, dim=1)).squeeze()/self.max_sequence_length
-        self.item_output = torch.tanh(torch.sum(self.item_output0, dim=1)).squeeze()/self.max_sequence_length
-        self.sentiment_ratings0 = self.to_sentiment_score(user_prob).squeeze()
-        # sentiment_ratings = self.position_to_1(sentiment_ratings).squeeze()
-        # sentiment_ratings = torch.sum(sentiment_ratings, dim=-1)/self.max_sequence_length
-        self.sentiment_ratings = torch.sum(self.sentiment_ratings0, dim=-1)
+        # nn.init.kaiming_normal_(self.W_u)
+        # nn.init.kaiming_normal_(self.W_i)
+        # nn.init.kaiming_normal_(self.w_hu)
+        # nn.init.kaiming_normal_(self.w_hi)
 
-        # shape:(batch_size)
-        # self.predicted_ratings0 = torch.sum(self.user_output*self.item_output, dim=1) + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze()
-        self.predicted_ratings0 = torch.sum(self.user_output*self.item_output, dim=1)/self.reduced_embedding_size + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze()
-        # self.predicted_ratings0 = self.concat_to_1(torch.cat((self.user_output, self.item_output), dim=-1)).squeeze()
-        predicted_ratings = 1 + 4 * torch.sigmoid(self.predicted_ratings0) + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze()
-        # predicted_ratings = self.position_to_1(output).squeeze()
+    def aspect_category_attention(self, embedding):
+        aspect_specific_embeddings = []
+
+        for aspect_index in range(self.num_aspects):
+            # 先通过广播机制将 broadcasted_aspect_category 广播成 shape: (batch_size, seq_len, reduced_embedding_size),
+            broadcasted_aspect_category = self.aspect_categorys(torch.tensor([aspect_index]).to(self.args.device)).unsqueeze(
+                dim=0)  # shape:(1,reduced_embedding_size)
+
+            # 再通过 sum 转成每个位置的内积
+            # shape(batch_size, seq_len)
+            dot_products = torch.sum(broadcasted_aspect_category * embedding, dim=-1)
+            temp_aspect_attention = nn.functional.softmax(dot_products, dim=-1)  # shape(batch_size, seq_len)
+            temp_aspect_attention = temp_aspect_attention.unsqueeze(dim=-1)  # shape(batch_size, seq_len, 1) 后面点乘的时候直接广播
+            aspect_specific_embeddings.append(torch.sum(embedding * temp_aspect_attention, dim=-2)) # shape(batch_size, reduced_embedding_size)
+
+        # shape: (num_aspects, batch_size, reduced_embedding_size)
+        aspect_specific_embeddings = torch.stack(aspect_specific_embeddings)
+        return aspect_specific_embeddings
+
+    def sentiment_aware_attention(self, aspect_specific_embeddings, tagging_logits, valid_seq_len=None):
+        # tagging_logits.shape: (batch_size, seq_len, 14)
+        # valid_seq_len.shape: (batch_size)
+        # sentiment_score.shape:  (batch_size, seq_len, 1)
+        # valid_seq_len = valid_seq_len.unsqueeze(dim=-1)
+        sentiment_score = self.to_sentiment_score(tagging_logits)
+        sentiment_attention = nn.functional.softmax(
+            sentiment_score, dim=-1).unsqueeze(dim=0)  # shape:  (1, batch_size, seq_len, 1)
+
+        aspect_specific_embeddings = sentiment_attention * aspect_specific_embeddings
+        # 所有位置的embedding加起来，融合成一个位置长度的 embedding
+        sentiment_aware_embeddings = torch.sum(aspect_specific_embeddings, dim=-2)
+        # shape (num_aspects, batch_size, reduced_embedding_size) 
+
+        return sentiment_aware_embeddings
+
+    def compute_rating(self, u_emb, i_emb, uids, iids):
+        # u_emb/i_emb (Tensor): (num_aspect, batch_size, reduced_embedding_size)
+
+        # predicted_ratings = torch.sum(torch.sum(u_emb*i_emb, dim=-1), dim=0)/self.num_aspects   # shape: (batch_size)
+        predicted_ratings = torch.sum(self.concat_to_1(torch.cat((u_emb, i_emb), dim=-1)).squeeze(), dim=0)/self.num_aspects
+        predicted_ratings = 1 + 4 * torch.sigmoid(predicted_ratings) + self.user_bias(uids).squeeze() + self.item_bias(iids).squeeze() # 限制输出范围为 1~5
+
+        # # below are ANR's methods for rating prediction, unfortunately we find it preforms not well, so we decide to use our simple way for rating prediction
+        # u_emb = u_emb.permute(1,0,2) # shape: (batch_size, num_aspect, reduced_embedding_size)
+        # i_emb = i_emb.permute(1,0,2) # shape: (batch_size, num_aspect, reduced_embedding_size)
+
+        # u_emb_t = torch.transpose(u_emb, 1, 2) # shape: (batch_size, reduced_embedding_size, num_aspect)
+        # i_emb_t = torch.transpose(i_emb, 1, 2) # shape: (batch_size, reduced_embedding_size, num_aspect)
+
+        # S = torch.relu(torch.matmul(torch.matmul(u_emb, self.W_s), i_emb_t))# shape: (batch_size, num_aspect, num_aspect)
+
+        # H_u = torch.relu(torch.matmul(u_emb, self.W_u) + torch.matmul(torch.transpose(S, 1, 2), torch.matmul(i_emb, self.W_i))) # (batch_size, num_aspect, h2)
+        # beta_u = torch.softmax(torch.matmul(H_u, self.w_hu).squeeze(), dim=-1) # (batch_size, num_aspect)
+
+        # H_i = torch.relu(torch.matmul(i_emb, self.W_i) + torch.matmul(S, torch.matmul(u_emb, self.W_u)))
+        # beta_i = torch.softmax(torch.matmul(H_i, self.w_hi).squeeze(), dim=-1)
+
+        # beta = beta_u * beta_i
+
+        # predicted_ratings = torch.sum(u_emb*i_emb, dim=-1) # (batch_size, num_aspect)
+        # predicted_ratings = torch.sum(beta * predicted_ratings, dim=-1) # (batch_size)
+        # predicted_ratings = 1 + 4 * torch.sigmoid(predicted_ratings) + self.user_bias(uids).squeeze() + self.item_bias(iids).squeeze()
 
         return predicted_ratings
+
+    def forward(self, uid, user_emb, user_logits, iid, item_emb, item_logits):
+        # no aspect and no sentiment
+        user_output = user_emb
+        item_output = item_emb
+
+        user_output = torch.sum(user_emb, dim=-2) / self.max_sequence_length
+        item_output = torch.sum(item_emb, dim=-2) / self.max_sequence_length
+
+        # predicted_ratings = torch.sum(user_output*item_output, dim=-1)
+        predicted_ratings = self.concat_to_1(torch.cat((user_output, item_output), dim=-1)).squeeze()
+        predicted_ratings = 1 + 4 * torch.sigmoid(predicted_ratings) + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze()
+
+        # # aspect + sentiment (or only one of them)
+        # user_output = user_emb
+        # item_output = item_emb
+
+        # user_output = self.aspect_category_attention(user_output)
+        # item_output = self.aspect_category_attention(item_output)
+
+        # # user_output = user_output.unsqueeze(dim=2).expand(-1, -1, self.max_sequence_length, -1) # shape: (num_aspects, batch_size, max_seq_len, reduced_embedding_size) 
+        # # item_output = item_output.unsqueeze(dim=2).expand(-1, -1, self.max_sequence_length, -1)
+
+        # # user_output = self.sentiment_aware_attention(user_output, user_logits)
+        # # item_output = self.sentiment_aware_attention(item_output, item_logits)
+
+        # # shape:(batch_size)
+        # predicted_ratings = self.compute_rating(user_output, item_output, uid, iid)
+
+        # semtiment ratings
+        user_emb_s = torch.sum(user_logits, dim=-2)
+        item_emb_s = torch.sum(item_logits, dim=-2)
+
+        # sentiment_ratings = torch.sum(user_emb_s*item_emb_s, dim=-1)
+        sentiment_ratings = self.concat_to_1_s(torch.cat((user_emb_s, item_emb_s), dim=-1)).squeeze()
+        sentiment_ratings = 1 + 4 * torch.sigmoid(sentiment_ratings) + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze()
+
+        return predicted_ratings, sentiment_ratings, user_output, item_output

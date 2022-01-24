@@ -1,7 +1,6 @@
 import json
 import glob
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from tensorboardX import SummaryWriter
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
@@ -412,8 +411,8 @@ def inference(args, inference_dataset, model, tokenizer, mode='inference', outpu
                         i in label_map.items()}  # id(int) to tag(str)
 
 
-    output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews_tiny.txt')
-    # output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews.txt')
+    # output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews_tiny.txt')
+    output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews.txt')
     with open(output_dir, 'w') as output_file:
         for batch in tqdm(inference_dataloader, desc="inferencing"):
             model.eval()

@@ -10,7 +10,7 @@ from torch.utils.data import Dataset, DataLoader, Dataset, TensorDataset, Random
 from torch.utils.data.distributed import DistributedSampler
 
 class RecDataset(Dataset):
-    def __init__(self, df, user_embs_dict, item_embs_dict, user_features, item_features):
+    def __init__(self, df, user_embs_dict, item_embs_dict, user_features_dict=None, item_features_dict=None):
         # self.user_embs_dict=user_embs_dict
         # self.item_embs_dict=item_embs_dict
         self.uids = torch.from_numpy(np.array(df['uid']))
@@ -24,6 +24,15 @@ class RecDataset(Dataset):
         item_embs = sorted(item_embs_dict.items())
         self.item_embs = torch.stack([emb[1][0] for emb in item_embs])
         self.item_tag_logis = torch.stack([emb[1][1] for emb in item_embs])
+
+        user_features = sorted(user_features_dict.items())
+        user_masks = torch.stack([torch.tensor(feature[1].input_mask, dtype=torch.long) for feature in user_features]).unsqueeze(dim=-1)
+
+        item_features = sorted(item_features_dict.items())
+        item_masks = torch.stack([torch.tensor(feature[1].input_mask, dtype=torch.long) for feature in item_features]).unsqueeze(dim=-1)
+
+        self.user_embs = self.user_embs * user_masks
+        self.item_embs = self.item_embs * item_masks
 
     def __getitem__(self, index):
         uid = self.uids[index]
@@ -44,7 +53,7 @@ class RecDataset(Dataset):
 def get_refinetune_dataset(args, task, tokenizer, processor):
     # Load refinetune features from cache or dataset file
     mode = 'refinetune'
-    cached_features_file = os.path.join(args.data_dir, 'cached_{}_{}_{}_{}'.format(
+    cached_features_file = os.path.join(args.data_dir, task, 'cached_{}_{}_{}_{}'.format(
         mode,
         list(filter(None, 'bert-base-uncased'.split('/'))).pop(),
         str(args.max_seq_length),
@@ -92,14 +101,14 @@ def get_refinetune_dataset(args, task, tokenizer, processor):
 def get_UserItem_dataset(args, task, tokenizer, processor):
     # Load user/item features from cache or dataset file
     mode = 'user'
-    cached_user_features_file = os.path.join(args.data_dir, 'cached_{}_{}_{}_{}'.format(
+    cached_user_features_file = os.path.join(args.data_dir, task, 'cached_{}_{}_{}_{}'.format(
         mode,
         list(filter(None, 'bert-base-uncased'.split('/'))).pop(),
         str(args.max_seq_length),
         str(task)))
 
     mode = 'item'
-    cached_item_features_file = os.path.join(args.data_dir, 'cached_{}_{}_{}_{}'.format(
+    cached_item_features_file = os.path.join(args.data_dir, task, 'cached_{}_{}_{}_{}'.format(
         mode,
         list(filter(None, 'bert-base-uncased'.split('/'))).pop(),
         str(args.max_seq_length),

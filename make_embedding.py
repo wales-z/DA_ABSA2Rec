@@ -29,7 +29,8 @@ def refinetune(args, refinetune_dataset, model, fine_tune_epochs = 3):
 
     for epoch_index in trange(fine_tune_epochs):
         fine_tune_loss = []
-        for step, batch in enumerate(refinetune_dataloader):
+        step = 0
+        for batch in refinetune_dataloader:
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
             inputs = {
@@ -49,6 +50,9 @@ def refinetune(args, refinetune_dataset, model, fine_tune_epochs = 3):
             fine_tune_optimizer.step()
             fine_tune_scheduler.step()  # Update learning rate schedule
             model.zero_grad()
+            step+=1
+            if step>= args.max_step:
+                break
         fine_tune_average_loss = torch.mean(torch.stack(fine_tune_loss))
         print(f'epoch {epoch_index}, tagging loss: {fine_tune_average_loss}')
     print(f're-fine-tune:done')
@@ -59,6 +63,7 @@ def make_doc_embedding(args, model, user_dataset, item_dataset, tiny=False):
     print(f'doing: generate user/item doc embedding and save them to files')
     print(f'tiny: {tiny}')
     batch_size = args.per_gpu_batch_size
+    pooler = nn.AdaptiveMaxPool1d(192).to(args.device)
 
     print(f'doing: user part')
     user_sampler = SequentialSampler(user_dataset)
@@ -77,6 +82,7 @@ def make_doc_embedding(args, model, user_dataset, item_dataset, tiny=False):
             }
 
             (tagging_loss, tagging_logits), last_hidden_state = model(**inputs, fine_tune=False)
+            last_hidden_state = pooler(last_hidden_state)
             for i in range(len(uids)):
                 user_emb_dict[uids[i].item()] = (last_hidden_state[i].cpu(), tagging_logits[i].cpu())
     output_dir = os.path.join(args.data_dir, args.dataset, 'user_emb.pkl')
@@ -87,33 +93,34 @@ def make_doc_embedding(args, model, user_dataset, item_dataset, tiny=False):
     f_u.close()
     print(f'user part: done')
 
-    print(f'doing: item part')
-    item_sampler = SequentialSampler(item_dataset)
-    item_dataloader = DataLoader(item_dataset, sampler=item_sampler, batch_size=batch_size)
+    # print(f'doing: item part')
+    # item_sampler = SequentialSampler(item_dataset)
+    # item_dataloader = DataLoader(item_dataset, sampler=item_sampler, batch_size=batch_size)
 
-    item_emb_dict = {}
-    with torch.no_grad():
-        for input_ids, attention_mask, token_type_ids, tagging_labels, iids in item_dataloader:
-            batch = (input_ids.to(args.device), attention_mask.to(args.device), token_type_ids.to(args.device), tagging_labels.to(args.device))
-            inputs = {
-                'input_ids':      batch[0],
-                'attention_mask': batch[1],
-                # XLM don't use segment_ids
-                'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-                'labels': batch[3],
-            }
+    # item_emb_dict = {}
+    # with torch.no_grad():
+    #     for input_ids, attention_mask, token_type_ids, tagging_labels, iids in item_dataloader:
+    #         batch = (input_ids.to(args.device), attention_mask.to(args.device), token_type_ids.to(args.device), tagging_labels.to(args.device))
+    #         inputs = {
+    #             'input_ids':      batch[0],
+    #             'attention_mask': batch[1],
+    #             # XLM don't use segment_ids
+    #             'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
+    #             'labels': batch[3],
+    #         }
 
-            (tagging_loss, tagging_logits), last_hidden_state = model(**inputs, fine_tune=False)
-            for i in range(len(iids)):
-                item_emb_dict[iids[i].item()] = (last_hidden_state[i].cpu(), tagging_logits[i].cpu())
-    output_dir = os.path.join(args.data_dir, args.dataset, 'item_emb.pkl')
-    if tiny==True:
-        output_dir = os.path.join(args.data_dir, args.dataset, 'item_emb_tiny.pkl')
-    with open(output_dir, 'wb') as f_i:
-        pickle.dump(item_emb_dict, f_i)
-    f_i.close()
-    print(f'item part: done')
-    print(f'generate user/item doc embedding and save them to files: done')
+    #         (tagging_loss, tagging_logits), last_hidden_state = model(**inputs, fine_tune=False)
+    #         last_hidden_state = pooler(last_hidden_state)
+    #         for i in range(len(iids)):
+    #             item_emb_dict[iids[i].item()] = (last_hidden_state[i].cpu(), tagging_logits[i].cpu())
+    # output_dir = os.path.join(args.data_dir, args.dataset, 'item_emb.pkl')
+    # if tiny==True:
+    #     output_dir = os.path.join(args.data_dir, args.dataset, 'item_emb_tiny.pkl')
+    # with open(output_dir, 'wb') as f_i:
+    #     pickle.dump(item_emb_dict, f_i)
+    # f_i.close()
+    # print(f'item part: done')
+    # print(f'generate user/item doc embedding and save them to files: done')
 
 def main():
     parser = argparse.ArgumentParser()
@@ -137,6 +144,8 @@ def main():
                              "than this will be truncated, sequences shorter will be padded.")
     parser.add_argument("--per_gpu_batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for training.")
+    parser.add_argument("--max_step", default=5000, type=int,
+                        help="max steps when refinetune (as reference, original final ueses 1500 steps for trainning).")
 
     args = parser.parse_args()
     dataset_name = args.dataset
