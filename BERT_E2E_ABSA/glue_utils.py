@@ -652,6 +652,7 @@ processors = {
     "rest16": ABSAProcessor,
     "electronics": ABSAProcessor,
     "cell_phones_and_accessories": ABSAProcessor,
+    "yelp": ABSAProcessor,
 }
 
 output_modes = {

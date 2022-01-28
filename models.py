@@ -814,7 +814,7 @@ class DA_ABSA2Rec(nn.Module):
         predicted_ratings = torch.sum(self.concat_to_1(torch.cat((u_emb, i_emb), dim=-1)).squeeze(), dim=0)/self.num_aspects
         predicted_ratings = 1 + 4 * torch.sigmoid(predicted_ratings) + self.user_bias(uids).squeeze() + self.item_bias(iids).squeeze() # 限制输出范围为 1~5
 
-        # # below are ANR's methods for rating prediction, unfortunately we find it preforms not well, so we decide to use our simple way for rating prediction
+        # # below are ANR's methods for rating prediction, unfortunately we found it preforms not well, so we decide to use our simple way for rating prediction
         # u_emb = u_emb.permute(1,0,2) # shape: (batch_size, num_aspect, reduced_embedding_size)
         # i_emb = i_emb.permute(1,0,2) # shape: (batch_size, num_aspect, reduced_embedding_size)
 
@@ -849,7 +849,7 @@ class DA_ABSA2Rec(nn.Module):
         predicted_ratings = self.concat_to_1(torch.cat((user_output, item_output), dim=-1)).squeeze()
         predicted_ratings = 1 + 4 * torch.sigmoid(predicted_ratings) + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze()
 
-        # # aspect + sentiment (or only one of them)
+        # # aspect + sentiment (or only one of them), we shall not use this since we found it not helpful to the performence
         # user_output = user_emb
         # item_output = item_emb
 

@@ -410,56 +410,53 @@ def inference(args, inference_dataset, model, tokenizer, mode='inference', outpu
     label_map_reverse = {i: label for label,
                         i in label_map.items()}  # id(int) to tag(str)
 
+    tagged_reviews=[]
 
-    # output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews_tiny.txt')
-    output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews.txt')
-    with open(output_dir, 'w') as output_file:
-        for batch in tqdm(inference_dataloader, desc="inferencing"):
-            model.eval()
-            batch = tuple(t.to(args.device) for t in batch)
+    for batch in tqdm(inference_dataloader, desc="inferencing"):
+        model.eval()
+        batch = tuple(t.to(args.device) for t in batch)
 
-            with torch.no_grad():
-                inputs = {'input_ids':      batch[0],
-                        'attention_mask': batch[1],
-                        # XLM don't use segment_ids
-                        'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-                        }
-                outputs, _ = model(**inputs)
-                # output is: (logits, bert-output)
-                # logits: (bsz, seq_len, label_size)
-                # here the loss is the masked loss
-                logits = outputs[0] # logits.shape: (bsz, seq_len, label_size)
-                crf_logits.append(logits)
-                crf_mask.append(batch[1])
-            nb_eval_steps += 1
+        with torch.no_grad():
+            inputs = {'input_ids':      batch[0],
+                    'attention_mask': batch[1],
+                    # XLM don't use segment_ids
+                    'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
+                    }
+            outputs, _ = model(**inputs)
+            # output is: (logits, bert-output)
+            # logits: (bsz, seq_len, label_size)
+            # here the loss is the masked loss
+            logits = outputs[0] # logits.shape: (bsz, seq_len, label_size)
+            crf_logits.append(logits)
+            crf_mask.append(batch[1])
+        nb_eval_steps += 1
 
-            # generate predicts tags
-            label_ids = torch.argmax(logits, dim=-1)  # shape: (bsz, seq_len)
+        # generate predicts tags
+        label_ids = torch.argmax(logits, dim=-1)  # shape: (bsz, seq_len)
 
-            input_ids = inputs['input_ids']  # shape: (bsz, seq_len)
-            batch_size = input_ids.shape[0]
-            tagged_reviews=[]
+        input_ids = inputs['input_ids']  # shape: (bsz, seq_len)
+        batch_size = input_ids.shape[0]
 
-            for batch_inner_index in range(batch_size):
-                # a string list, an element is a word
-                words = tokenizer.convert_ids_to_tokens(input_ids[batch_inner_index])
-                # a string list, an element is a tag
-                tags = [label_map_reverse[tag_id]
-                        for tag_id in label_ids[batch_inner_index].tolist()]
-                # get tagged sentence
-                sentence_length = len(tags)
-                for position_index in range(sentence_length):
-                    tags[position_index] = words[position_index] + \
-                        '='+tags[position_index]
-                tags_sequence = ' '.join(tags)
-                tags_sequence = to_clean_sequence(tags_sequence, mode='tag')
-                word_sequence = ' '.join(words)
-                word_sequence = to_clean_sequence(word_sequence, mode='words')
-                tagged_sentence = word_sequence + '.####' + tags_sequence + '\n'
-                tagged_reviews.append(tagged_sentence)
+        for batch_inner_index in range(batch_size):
+            # a string list, an element is a word
+            words = tokenizer.convert_ids_to_tokens(input_ids[batch_inner_index])
+            # a string list, an element is a tag
+            tags = [label_map_reverse[tag_id]
+                    for tag_id in label_ids[batch_inner_index].tolist()]
+            # get tagged sentence
+            sentence_length = len(tags)
+            for position_index in range(sentence_length):
+                tags[position_index] = words[position_index] + \
+                    '='+tags[position_index]
+            tags_sequence = ' '.join(tags)
+            tags_sequence = to_clean_sequence(tags_sequence, mode='tag')
+            word_sequence = ' '.join(words)
+            word_sequence = to_clean_sequence(word_sequence, mode='words')
+            tagged_sentence = word_sequence + '.####' + tags_sequence
+            tagged_reviews.append(tagged_sentence)
 
-            output_file.writelines(tagged_reviews)
-        output_file.close()
+    return tagged_reviews
+
     print(f'inference: done')
 
 def load_and_cache_examples(args, task, tokenizer, mode='train'):
@@ -546,7 +543,7 @@ def load_and_cache_examples(args, task, tokenizer, mode='train'):
     all_evaluate_label_ids = [f.evaluate_label_ids for f in features]
     return dataset, all_evaluate_label_ids
 
-def to_tagged_reviews_df(args, dataset_name, tiny = False):
+def to_tagged_reviews_df(args, dataset_name, tagged_reviews_list, tiny = False):
     print(f'doing: generate tagged reviews dataframe')
     if tiny == True:
         reviews_df_path = os.path.join(args.rs_data_dir, 'reviews_df_tiny.pkl')
@@ -555,9 +552,7 @@ def to_tagged_reviews_df(args, dataset_name, tiny = False):
         f_reviews_df.close()
 
         reviews_df = reviews_df.reset_index(drop=True)
-        tagged_reviews_path = os.path.join(args.rs_data_dir, 'tagged_reviews_tiny.txt')
-        tagged_reviews = pd.read_csv(tagged_reviews_path, header=None)
-        reviews_df['tagged_reviews'] = tagged_reviews
+        reviews_df['tagged_reviews'] = pd.Series(tagged_reviews_list) 
 
         output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews_df_tiny.pkl')
         with open(output_dir, 'wb') as f_tagged_reviews_df:
@@ -569,9 +564,7 @@ def to_tagged_reviews_df(args, dataset_name, tiny = False):
         f_reviews_df.close()
 
         reviews_df = reviews_df.reset_index(drop=True)
-        tagged_reviews_path = os.path.join(args.rs_data_dir, 'tagged_reviews.txt')
-        tagged_reviews = pd.read_csv(tagged_reviews_path, header=None)
-        reviews_df['tagged_reviews'] = tagged_reviews
+        reviews_df['tagged_reviews'] = pd.Series(tagged_reviews_list) 
 
         output_dir = os.path.join(args.rs_data_dir, 'tagged_reviews_df.pkl')
         with open(output_dir, 'wb') as f_tagged_reviews_df:
@@ -646,16 +639,6 @@ def main():
                                                           find_unused_parameters=True)
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
-
-    # # inference phase
-    # inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
-    #     args, args.task_name, tokenizer, mode='inference')
-    # inference(args, inference_dataset, model, tokenizer)
-
-    # # generate tagged reviews dataframe file
-    # dataset_name = 'cell_phones_and_accessories'
-    # to_tagged_reviews_df(args, dataset_name, tiny=True)
-
 
     # Training
     if args.do_train:
@@ -755,14 +738,14 @@ def main():
     log_file.write('******************************************\n')
     log_file.close()
 
-    # inference phase
-    inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
-        args, args.task_name, tokenizer, mode='inference')
-    inference(args, inference_dataset, model, tokenizer)
+    # # inference phase
+    # inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
+    #     args, args.task_name, tokenizer, mode='inference')
+    # tagged_reviews_list = inference(args, inference_dataset, model, tokenizer)
 
-    # generate tagged reviews dataframe file
-    dataset_name = args.rs_task_name
-    to_tagged_reviews_df(args, dataset_name, tiny=False)
+    # # generate tagged reviews dataframe file
+    # dataset_name = args.rs_task_name
+    # to_tagged_reviews_df(args, dataset_name, tagged_reviews_list, tiny=False)
 
 if __name__ == '__main__':
     main()

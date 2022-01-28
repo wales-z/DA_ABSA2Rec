@@ -9,7 +9,7 @@ from utils import ABSAProcessor, convert_examples_to_seq_features, convert_dict_
 from torch.utils.data import Dataset, DataLoader, Dataset, TensorDataset, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
-class RecDataset(Dataset):
+class RecDataset_ori(Dataset):
     def __init__(self, df, user_embs_dict, item_embs_dict, user_features_dict=None, item_features_dict=None):
         # self.user_embs_dict=user_embs_dict
         # self.item_embs_dict=item_embs_dict
@@ -46,6 +46,24 @@ class RecDataset(Dataset):
         item_logits = self.item_tag_logis[iid]
 
         return uid, user_emb, user_logits, iid, item_emb, item_logits, rating
+
+    def __len__(self):
+        return len(self.ratings)
+
+class RecDataset(Dataset):
+    def __init__(self, df):
+        # self.user_embs_dict=user_embs_dict
+        # self.item_embs_dict=item_embs_dict
+        self.uids = torch.from_numpy(np.array(df['uid']))
+        self.iids = torch.from_numpy(np.array(df['iid']))
+        self.ratings = torch.from_numpy(np.array(df['overall'], dtype=np.float32))
+
+    def __getitem__(self, index):
+        uid = self.uids[index]
+        iid = self.iids[index]
+        rating = self.ratings[index]
+
+        return uid, iid, rating
 
     def __len__(self):
         return len(self.ratings)
@@ -146,13 +164,12 @@ def get_UserItem_dataset(args, task, tokenizer, processor):
     all_input_ids = torch.tensor([f.input_ids for f in features.values()], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in features.values()], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in features.values()], dtype=torch.long)
-    all_label_ids = torch.tensor([f.label_ids for f in features.values()], dtype=torch.long)
     all_uids = torch.tensor([identifier for identifier in features.keys()], dtype=torch.int32)
 
     # used in evaluation
     user_all_evaluate_label_ids = [f.evaluate_label_ids for f in features.values()]
 
-    user_dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_uids)
+    user_dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_uids)
 
     # item feature part
     if os.path.exists(cached_item_features_file):
@@ -182,12 +199,11 @@ def get_UserItem_dataset(args, task, tokenizer, processor):
     all_input_ids = torch.tensor([f.input_ids for f in features.values()], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in features.values()], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in features.values()], dtype=torch.long)
-    all_label_ids = torch.tensor([f.label_ids for f in features.values()], dtype=torch.long)
     all_iids = torch.tensor([identifier for identifier in features.keys()], dtype=torch.int32)
 
     # used in evaluation
     item_all_evaluate_label_ids = [f.evaluate_label_ids for f in features.values()]
 
-    item_dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_iids)
+    item_dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_iids)
 
     return user_dataset, user_all_evaluate_label_ids, item_dataset, item_all_evaluate_label_ids

@@ -33,7 +33,7 @@ class InputExample(object):
 
 class SeqInputFeatures(object):
     """A single set of features of data for the ABSA task"""
-    def __init__(self, input_ids, input_mask, segment_ids, label_ids, evaluate_label_ids):
+    def __init__(self, input_ids, input_mask, segment_ids, label_ids=None, evaluate_label_ids=None):
         self.input_ids = input_ids
         self.input_mask = input_mask
         self.segment_ids = segment_ids
@@ -87,31 +87,29 @@ class ABSAProcessor(DataProcessor):
             self.postfix = ''
 
         # re-fine-tune 只使用训练集的 review 和 psuedo tags
-        train_df_path = os.path.join(data_dir, task_name, 'tagged_reviews_df_train' + self.postfix+ '.pkl')
+        train_df_path = os.path.join(data_dir, task_name, 'reviews_df_train' + self.postfix+ '.pkl')
         with open(train_df_path, 'rb') as f_train_df:
             self.train_df = pickle.load(f_train_df)
         f_train_df.close()
 
-        tagged_udocs_path = os.path.join(data_dir, task_name, 'tagged_udocs' + self.postfix+ '.pkl')
-        tagged_idocs_path = os.path.join(data_dir, task_name, 'tagged_idocs' + self.postfix+ '.pkl')
+        udocs_path = os.path.join(data_dir, task_name, 'udocs' + self.postfix+ '.pkl')
+        idocs_path = os.path.join(data_dir, task_name, 'idocs' + self.postfix+ '.pkl')
 
-        with open(tagged_udocs_path, 'rb') as f_tagged_udocs:
-            self.tagged_udocs = pickle.load(f_tagged_udocs)
-        f_tagged_udocs.close()
+        with open(udocs_path, 'rb') as f_udocs:
+            self.udocs = pickle.load(f_udocs)
 
-        with open(tagged_idocs_path, 'rb') as f_tagged_idocs:
-            self.tagged_idocs = pickle.load(f_tagged_idocs)
-        f_tagged_idocs.close()
+        with open(idocs_path, 'rb') as f_idocs:
+            self.idocs = pickle.load(f_idocs)
 
     """Processor for the ABSA datasets"""
     def get_refinetune_examples(self, data_dir, task_name, tagging_schema):
         return self._create_examples(data_dir=data_dir, task_name=task_name, mode='refinetune', tagging_schema=tagging_schema, df=self.train_df)
 
     def get_user_examples(self, data_dir, task_name, tagging_schema):
-        return self._create_dict_examples(data_dir=data_dir, task_name=task_name, mode='user', tagging_schema=tagging_schema, tagged_docs=self.tagged_udocs)
+        return self._create_dict_examples(data_dir=data_dir, task_name=task_name, mode='user', tagging_schema=tagging_schema, docs=self.udocs)
 
     def get_item_examples(self, data_dir, task_name, tagging_schema):
-        return self._create_dict_examples(data_dir=data_dir, task_name=task_name, mode='item', tagging_schema=tagging_schema, tagged_docs=self.tagged_idocs)
+        return self._create_dict_examples(data_dir=data_dir, task_name=task_name, mode='item', tagging_schema=tagging_schema, docs=self.idocs)
 
     # def get_train_examples(self, data_dir, task_name, tagging_schema):
     #     return self._create_examples(data_dir=data_dir, task_name=task_name, mode='train', tagging_schema=tagging_schema)
@@ -134,37 +132,27 @@ class ABSAProcessor(DataProcessor):
         else:
             raise Exception("Invalid tagging schema %s..." % tagging_schema)
 
-    def _create_dict_examples(self, data_dir, task_name, tagging_schema, tagged_docs, mode='train'):
+    def _create_dict_examples(self, data_dir, task_name, tagging_schema, docs, mode='user'):
+        def string_to_word_list(s):
+            s = s.replace(":",'')
+            s = s.replace(",",'')
+            s = s.replace(".",'')
+            s = s.replace("!",'')
+            s = s.replace("?",'')
+            s = s.replace('\"', '')
+            s = s.strip()
+            return s.split()
+
         examples = {}
         sample_id = 0
-        for identifier, line in tagged_docs.items():
-            sent_string, tag_string = line.strip().split('####')
-            sent_string = sent_string.replace('.','')
-            words = []
-            tags = []
-            for tag_item in tag_string.split():
-                eles = tag_item.split('=')
-                if len(eles) == 1:
-                    raise Exception("Invalid samples %s..." % tag_string)
-                elif len(eles) == 2:
-                    word, tag = eles
-                else:
-                    word = ''.join((len(eles) - 2) * ['='])
-                    tag = eles[-1]
-                words.append(word)
-                tags.append(tag)
-            # convert from ot to bieos
-            if tagging_schema == 'BIEOS':
-                tags = ot2bieos_ts(tags)
-            elif tagging_schema == 'BIO':
-                tags = ot2bio_ts(tags)
-            else:
-                # original tags follow the OT tagging schema, do nothing
-                pass
+        for identifier, line in docs.items():
+            sent_string = line.strip()
+            words = string_to_word_list(sent_string)
+
             guid = "%s-%s" % (mode, sample_id)
             text_a = ' '.join(words)
-            #label = [absa_label_vocab[tag] for tag in tags]
-            examples[identifier] = InputExample(guid=guid, text_a=text_a, text_b=None, label=tags)
+            
+            examples[identifier] = InputExample(guid=guid, text_a=text_a, text_b=None, label=None)
             sample_id += 1
         return examples
 
@@ -319,32 +307,28 @@ def convert_dict_examples_to_seq_features(examples, label_list, tokenizer,
     examples_tokenized = {}
     for identifier, example in examples.items():
         tokens_a = []
-        labels_a = []
         evaluate_label_ids = []
         words = example.text_a.split(' ')
         wid, tid = 0, 0
-        for word, label in zip(words, example.label):
+        for word in words:
             subwords = tokenizer.tokenize(word)
             tokens_a.extend(subwords)
-            if label != 'O':
-                labels_a.extend([label] + ['EQ'] * (len(subwords) - 1))
-            else:
-                labels_a.extend(['O'] * len(subwords))
             evaluate_label_ids.append(tid)
             wid += 1
             # move the token pointer
             tid += len(subwords)
+
         #print(evaluate_label_ids)
         assert tid == len(tokens_a)
         evaluate_label_ids = np.array(evaluate_label_ids, dtype=np.int32)
-        examples_tokenized[identifier] = (tokens_a, labels_a, evaluate_label_ids)
+        examples_tokenized[identifier] = (tokens_a, evaluate_label_ids)
         if len(tokens_a) > max_seq_length:
             max_seq_length = len(tokens_a)
     max_seq_length = min(510, max_seq_length)
     # count on the [CLS] and [SEP]
     max_seq_length += 2
     #max_seq_length = 128
-    for identifier, (tokens_a, labels_a, evaluate_label_ids) in examples_tokenized.items():
+    for identifier, (tokens_a, evaluate_label_ids) in examples_tokenized.items():
         #tokens_a = tokenizer.tokenize(example.text_a)
 
         # Account for [CLS] and [SEP] with "- 2"
@@ -354,32 +338,25 @@ def convert_dict_examples_to_seq_features(examples, label_list, tokenizer,
         #    labels_a = labels_a
         tokens = tokens_a + [sep_token]
         segment_ids = [sequence_a_segment_id] * len(tokens)
-        labels = labels_a + ['O']
         if cls_token_at_end:
             # evaluate label ids not change
             tokens = tokens + [cls_token]
             segment_ids = segment_ids + [cls_token_segment_id]
-            labels = labels + ['O']
         else:
             # right shift 1 for evaluate label ids
             tokens = [cls_token] + tokens
             segment_ids = [cls_token_segment_id] + segment_ids
-            labels = ['O'] + labels
             evaluate_label_ids += 1
         input_ids = tokenizer.convert_tokens_to_ids(tokens)
         input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
         # Zero-pad up to the sequence length.
         padding_length = max_seq_length - len(input_ids)
-        #print("Current labels:", labels)
-        label_ids = [label_map[label] for label in labels]
 
         # pad the input sequence and the mask sequence
         if pad_on_left:
             input_ids = ([pad_token] * padding_length) + input_ids
             input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
             segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
-            # pad sequence tag 'O'
-            label_ids = ([0] * padding_length) + label_ids
             # right shift padding_length for evaluate_label_ids
             evaluate_label_ids += padding_length
         else:
@@ -387,25 +364,19 @@ def convert_dict_examples_to_seq_features(examples, label_list, tokenizer,
             input_ids = input_ids + ([pad_token] * padding_length)
             input_mask = input_mask + ([0 if mask_padding_with_zero else 1] * padding_length)
             segment_ids = segment_ids + ([pad_token_segment_id] * padding_length)
-            # pad sequence tag 'O'
-            label_ids = label_ids + ([0] * padding_length)
-
         # 对长序列进行截断处理
         input_ids = input_ids[:max_seq_length]
         input_mask = input_mask[:max_seq_length]
         segment_ids = segment_ids[:max_seq_length]
-        label_ids = label_ids[:max_seq_length]
         # print(f'len(input_ids)={len(input_ids)}, len(input_mask)={len(input_mask)}, len(segment_ids)={len(segment_ids)}')
 
         assert len(input_ids) == max_seq_length
         assert len(input_mask) == max_seq_length
         assert len(segment_ids) == max_seq_length
-        assert len(label_ids) == max_seq_length
 
         features[identifier] = SeqInputFeatures(input_ids=input_ids,
                                                 input_mask=input_mask,
                                                 segment_ids=segment_ids,
-                                                label_ids=label_ids,
                                                 evaluate_label_ids=evaluate_label_ids
                                                 )
     print("maximal sequence length is", max_seq_length)

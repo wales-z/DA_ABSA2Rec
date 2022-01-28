@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #!/usr/bin/env bash
 TASK_NAME=laptop14
-RS_TASK_NAME=electronics
+RS_TASK_NAME=cell_phones_and_accessories
 ABSA_TYPE=tfm
-CUDA_VISIBLE_DEVICES=3 python main.py --model_type bert \
+CUDA_VISIBLE_DEVICES=0 python main.py --model_type bert \
                          --absa_type ${ABSA_TYPE} \
                          --tfm_mode finetune \
                          --fix_tfm 0 \

@@ -63,7 +63,7 @@ def make_doc_embedding(args, model, user_dataset, item_dataset, tiny=False):
     print(f'doing: generate user/item doc embedding and save them to files')
     print(f'tiny: {tiny}')
     batch_size = args.per_gpu_batch_size
-    pooler = nn.AdaptiveMaxPool1d(192).to(args.device)
+    pooler = nn.AdaptiveMaxPool1d(args.reduced_embedding_size).to(args.device)
 
     print(f'doing: user part')
     user_sampler = SequentialSampler(user_dataset)
@@ -71,17 +71,17 @@ def make_doc_embedding(args, model, user_dataset, item_dataset, tiny=False):
 
     user_emb_dict = {}
     with torch.no_grad():
-        for input_ids, attention_mask, token_type_ids, tagging_labels, uids in user_dataloader:
-            batch = (input_ids.to(args.device), attention_mask.to(args.device), token_type_ids.to(args.device), tagging_labels.to(args.device))
+        for input_ids, attention_mask, token_type_ids, uids in user_dataloader:
+            batch = (input_ids.to(args.device), attention_mask.to(args.device), token_type_ids.to(args.device))
             inputs = {
                 'input_ids':      batch[0],
                 'attention_mask': batch[1],
                 # XLM don't use segment_ids
                 'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-                'labels': batch[3],
             }
-
-            (tagging_loss, tagging_logits), last_hidden_state = model(**inputs, fine_tune=False)
+            output = model(**inputs, fine_tune=False)
+            tagging_logits = output[0][0]
+            last_hidden_state = output[1]
             last_hidden_state = pooler(last_hidden_state)
             for i in range(len(uids)):
                 user_emb_dict[uids[i].item()] = (last_hidden_state[i].cpu(), tagging_logits[i].cpu())
@@ -93,34 +93,35 @@ def make_doc_embedding(args, model, user_dataset, item_dataset, tiny=False):
     f_u.close()
     print(f'user part: done')
 
-    # print(f'doing: item part')
-    # item_sampler = SequentialSampler(item_dataset)
-    # item_dataloader = DataLoader(item_dataset, sampler=item_sampler, batch_size=batch_size)
+    print(f'doing: item part')
+    item_sampler = SequentialSampler(item_dataset)
+    item_dataloader = DataLoader(item_dataset, sampler=item_sampler, batch_size=batch_size)
 
-    # item_emb_dict = {}
-    # with torch.no_grad():
-    #     for input_ids, attention_mask, token_type_ids, tagging_labels, iids in item_dataloader:
-    #         batch = (input_ids.to(args.device), attention_mask.to(args.device), token_type_ids.to(args.device), tagging_labels.to(args.device))
-    #         inputs = {
-    #             'input_ids':      batch[0],
-    #             'attention_mask': batch[1],
-    #             # XLM don't use segment_ids
-    #             'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-    #             'labels': batch[3],
-    #         }
+    item_emb_dict = {}
+    with torch.no_grad():
+        for input_ids, attention_mask, token_type_ids, iids in item_dataloader:
+            batch = (input_ids.to(args.device), attention_mask.to(args.device), token_type_ids.to(args.device))
+            inputs = {
+                'input_ids':      batch[0],
+                'attention_mask': batch[1],
+                # XLM don't use segment_ids
+                'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
+            }
 
-    #         (tagging_loss, tagging_logits), last_hidden_state = model(**inputs, fine_tune=False)
-    #         last_hidden_state = pooler(last_hidden_state)
-    #         for i in range(len(iids)):
-    #             item_emb_dict[iids[i].item()] = (last_hidden_state[i].cpu(), tagging_logits[i].cpu())
-    # output_dir = os.path.join(args.data_dir, args.dataset, 'item_emb.pkl')
-    # if tiny==True:
-    #     output_dir = os.path.join(args.data_dir, args.dataset, 'item_emb_tiny.pkl')
-    # with open(output_dir, 'wb') as f_i:
-    #     pickle.dump(item_emb_dict, f_i)
-    # f_i.close()
-    # print(f'item part: done')
-    # print(f'generate user/item doc embedding and save them to files: done')
+            output = model(**inputs, fine_tune=False)
+            tagging_logits = output[0][0]
+            last_hidden_state = output[1]
+            last_hidden_state = pooler(last_hidden_state)
+            for i in range(len(iids)):
+                item_emb_dict[iids[i].item()] = (last_hidden_state[i].cpu(), tagging_logits[i].cpu())
+    output_dir = os.path.join(args.data_dir, args.dataset, 'item_emb.pkl')
+    if tiny==True:
+        output_dir = os.path.join(args.data_dir, args.dataset, 'item_emb_tiny.pkl')
+    with open(output_dir, 'wb') as f_i:
+        pickle.dump(item_emb_dict, f_i)
+    f_i.close()
+    print(f'item part: done')
+    print(f'generate user/item doc embedding and save them to files: done')
 
 def main():
     parser = argparse.ArgumentParser()
@@ -132,7 +133,7 @@ def main():
                         help='Weather to generate a tiny version of dataset')
     parser.add_argument("--model_type", default='bert', type=str,
                         help="Model type selected in the list: ['bert']")
-    parser.add_argument("--fine_tune_learning_rate", default=5e-5, type=float,
+    parser.add_argument("--fine_tune_learning_rate", default=2e-5, type=float,
                         help="The initial learning rate for Adam.")
     parser.add_argument("--max_grad_norm", default=1.0, type=float,
                         help="Max gradient norm.")
@@ -142,10 +143,12 @@ def main():
     parser.add_argument("--max_seq_length", default=512, type=int,
                         help="The maximum total input sequence length after tokenization. Sequences longer "
                              "than this will be truncated, sequences shorter will be padded.")
-    parser.add_argument("--per_gpu_batch_size", default=8, type=int,
+    parser.add_argument("--per_gpu_batch_size", default=4, type=int,
                         help="Batch size per GPU/CPU for training.")
-    parser.add_argument("--max_step", default=5000, type=int,
+    parser.add_argument("--max_step", default=2000, type=int,
                         help="max steps when refinetune (as reference, original final ueses 1500 steps for trainning).")
+    parser.add_argument("--reduced_embedding_size", default=128, type=int,
+                        help="the reduced embedding size from original bert embedding size (hidden size) 768. Better choose a divisible number for 768.")
 
     args = parser.parse_args()
     dataset_name = args.dataset
@@ -167,12 +170,14 @@ def main():
                                                 do_lower_case=True, cache_dir='./cache')
 
     fine_tuned_parameter_path = os.path.join('BERT_E2E_ABSA', 'bert-tfm-laptop14-finetune', 'pytorch_model.bin')
+    if args.dataset == 'yelp':
+        fine_tuned_parameter_path = os.path.join('BERT_E2E_ABSA', 'bert-tfm-rest14-finetune', 'pytorch_model.bin')
     bertABSATagger = BertABSATagger.from_pretrained(fine_tuned_parameter_path, from_tf=False,
                                 config=bert_config, cache_dir='./cache')
     bertABSATagger.to(args.device)
 
-    refinetune_dataset, refinetune_all_evaluate_label_ids = get_refinetune_dataset(args, dataset_name, tokenizer, processor)
-    refinetuned_bertABSATagger = refinetune(args, refinetune_dataset, bertABSATagger)
+    # refinetune_dataset, refinetune_all_evaluate_label_ids = get_refinetune_dataset(args, dataset_name, tokenizer, processor)
+    # refinetuned_bertABSATagger = refinetune(args, refinetune_dataset, bertABSATagger)
     refinetuned_bertABSATagger = bertABSATagger
 
     user_dataset, user_all_evaluate_label_ids, item_dataset, item_all_evaluate_label_ids = get_UserItem_dataset(args, dataset_name, tokenizer, processor)

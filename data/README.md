@@ -5,9 +5,9 @@ In our experiment, we choose Amazon reviews 5-core "Electornics", "Cell Phones a
 Some basic Information for the dataset we use.
 ## 1 Amazon reviews 5-core
 ### 1.1 Electronics
-user num: 192253
-item num: 63001
-review/rating num: 1687517 
+user num: 192238
+item num: 62973
+review num: 1687366
 ### 1.2 Cell Phones and Accessories
 user num: 27845
 item num: 10429
@@ -19,16 +19,19 @@ review/rating num: 194204
 > review/rating num: 4909 / 9146 
 
 ## 2 Yelp reviews
-yelp数据集提供了3个对评论质量进行评价的维度并由用户自行评价（类似对评论点赞、点踩）：userful, funny, cool（以下都是 review 数量）
-original: 8635403 
-when filtering with useful>0: 3877235
-when filtering with funny>0: 1596435
-when filtering with cool>0: 1948423
-when filtering with useful>0 & cool>0: 1679558
-when filtering with all 3 conditions above: 954713
-
-when filtering with 5-core setting: 5766970
-when filtering with 10-core setting: 4219140
-
-when filtering with 5-core & useful>0: 2334990
-when filtering with 5-core & useful>0 & cool>0: 1005090
+user num: 50059
+item num: 61634
+review/rating num: 1005090 
+> yelp数据集提供了3个对评论质量进行评价的维度并由用户自行评价（类似对评论点赞、点踩）：userful, funny, cool（以下都是 review 数量）
+> original: 8635403 
+> when filtering with useful>0: 3877235
+> when filtering with funny>0: 1596435 (不建议用这个)
+> when filtering with cool>0: 1948423
+> when filtering with useful>0 & cool>0: 1679558
+> when filtering with all 3 conditions above: 954713
+> 
+> when filtering with 5-core setting: 5766970
+> when filtering with 10-core setting: 4219140
+> 
+> when filtering with 5-core & useful>0: 2334990
+> when filtering with 5-core & useful>0 & cool>0: 1005090 (this is chosen)

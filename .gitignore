@@ -138,6 +138,7 @@ dmypy.json
 electronics/
 cell_phones_and_accessories/
 laptop14/
+rest14/
 reviews_Cell_Phones_and_Accessories_5.json
 reviews_Electronics_5.json
 /data/cache
@@ -160,3 +161,4 @@ reviews_Electronics_5.json
 /BERT_E2E_ABSA/bert-tfm-laptop14-finetune
 /BERT_E2E_ABSA/cache
 /BERT_E2E_ABSA/runs
+/BERT_E2E_ABSA/bert-tfm-rest14-finetune
