@@ -738,6 +738,16 @@ def main():
     log_file.write('******************************************\n')
     log_file.close()
 
+    # load and save the parameters of ABSA layer
+    # params_path = os.path.join(best_checkpoint, 'pytorch_model.bin')
+    # params = torch.load(params_path)
+    # weight = params['classifier.weight'].to('cpu')
+    # bias = params['classifier.bias'].to('cpu')
+    # param_dict = {'weight': weight, 'bias': bias}
+    # save_path = os.path.join(args.output_dir, 'absa_param_dict.bin')
+    # torch.save(param_dict, save_path)
+    # print(f'saved parameters of ABSA layer to {save_path}')
+
     # # inference phase
     # inference_dataset, train_evaluate_label_ids = load_and_cache_examples(
     #     args, args.task_name, tokenizer, mode='inference')

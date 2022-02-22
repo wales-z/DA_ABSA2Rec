@@ -155,10 +155,10 @@ def get_UserItem_dataset(args, task, tokenizer, processor):
                                                     pad_on_left=bool(args.model_type in ['xlnet']),
                                                     pad_token_segment_id=4 if args.model_type in ['xlnet'] else 0)
 
-        #logger.info("Saving features into cached file %s", cached_features_file)
-        with open(cached_user_features_file, 'wb') as f_user:
-            pickle.dump(features, f_user)
-        f_user.close()
+    #logger.info("Saving features into cached file %s", cached_features_file)
+    with open(cached_user_features_file, 'wb') as f_user:
+        pickle.dump(features, f_user)
+    f_user.close()
 
     # Convert to Tensors and build dataset
     all_input_ids = torch.tensor([f.input_ids for f in features.values()], dtype=torch.long)
@@ -190,10 +190,10 @@ def get_UserItem_dataset(args, task, tokenizer, processor):
                                                     pad_on_left=bool(args.model_type in ['xlnet']),
                                                     pad_token_segment_id=4 if args.model_type in ['xlnet'] else 0)
 
-        #logger.info("Saving features into cached file %s", cached_features_file)
-        with open(cached_item_features_file, 'wb') as f_item:
-            pickle.dump(features, f_item)
-        f_item.close()
+    #logger.info("Saving features into cached file %s", cached_features_file)
+    with open(cached_item_features_file, 'wb') as f_item:
+        pickle.dump(features, f_item)
+    f_item.close()
 
     # Convert to Tensors and build dataset
     all_input_ids = torch.tensor([f.input_ids for f in features.values()], dtype=torch.long)

@@ -18,12 +18,15 @@ from sklearn.model_selection import train_test_split
 dataset_to_rawfile_name = {
     'electronics': 'reviews_Electronics_5.json',
     'cell_phones_and_accessories': "reviews_Cell_Phones_and_Accessories_5.json",
-    'yelp': 'yelp_academic_dataset_review.json'
+    'yelp': 'yelp_academic_dataset_review.json',
+    'video_games': 'reviews_Video_Games_5.json',
+    'automotive': 'reviews_Automotive_5.json',
+    'musical_instruments': 'reviews_Musical_Instruments_5.json'
 }
 
 class Preprocessor:
     def __init__(self, dataset_name, tiny=False):
-        print('doing: preprocess {dataset_name} dataset')
+        print(f'doing: preprocess {dataset_name} dataset')
         self.base_dir = './' + dataset_name+'/'
         rawfile_path = dataset_to_rawfile_name[dataset_name]
         raw_df = pd.read_json(rawfile_path, lines=True)
@@ -46,7 +49,7 @@ class Preprocessor:
             df = self.filterout(df, 5, 5).reset_index(drop=True)
             df = self.convert_idx(df)
             self.save_to_file(dataset_name, df)
-        print('preprocess {dataset_name} dataset: done')
+        print(f'preprocess {dataset_name} dataset: done')
 
     def filterout(self, df, thre_i, thre_u):
         index = df[["overall", "asin"]].groupby('asin').count() >= thre_i
@@ -96,7 +99,7 @@ class Preprocessor:
     def save_to_file(self, dataset_name, reviews_df, udict=None, idict=None, udocs=None, idocs=None, postfix=''):
         base_dir = "./"+dataset_name+"/"
 
-        reviews_df['reviewText'].to_csv(base_dir+'reviews' + postfix + '.txt', index=False, header=False)
+        # reviews_df['reviewText'].to_csv(base_dir+'reviews' + postfix + '.txt', index=False, header=False)
         with open(base_dir + 'reviews_df' + postfix + '.pkl', 'wb') as f_reviews_df:
             pickle.dump(reviews_df, f_reviews_df)
         f_reviews_df.close()
@@ -222,6 +225,8 @@ def split_dataset(dataset_name, df, tiny = False):
     print(f'new item num: {max_iid+1}')
     del train_dataset['asin']
     del test_dataset['asin']
+    train_dataset = train_dataset.reset_index(drop=True)
+    test_dataset = test_dataset.reset_index(drop=True)
 
     # trainDF_to_tagged_documents(dataset_name=dataset_name, df=train_dataset, tiny=tiny)
     trainDF_to_documents(dataset_name=dataset_name, df=train_dataset, tiny=tiny)

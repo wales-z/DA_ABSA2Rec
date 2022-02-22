@@ -1,5 +1,5 @@
 TASK_NAME=laptop14
-RS_TASK_NAME=cell_phones_and_accessories
+RS_TASK_NAME=musical_instruments
 ABSA_TYPE=tfm
 
 echo 'ABSA dataset': ${TASK_NAME}
@@ -32,16 +32,17 @@ echo 'Rec dataset': ${RS_TASK_NAME}
 #                          --max_steps 1500
 # echo 'Done: train and save the BERT-ABSA network'
 
-cd ../data
+# cd ../data
 echo 'Now doing: preprocess the Rec dataset and split into train set and test set'
 mkdir ${RS_TASK_NAME}
 python preprocess.py --dataset ${RS_TASK_NAME}
 echo 'Done: preprocess the Rec dataset and split into train set and test set'
 
-echo 'Now doing: re-finetune BERT-ABSA and generate user/item document embeddings'
+echo 'Now doing: re-finetune BERT-ABSA and Generate user/item document embeddings'
 cd ../
 CUDA_VISIBLE_DEVICES=3 python make_embedding.py --dataset ${RS_TASK_NAME} \
                          --fine_tune_learning_rate 2e-5 \
                          --per_gpu_batch_size 4 \
                          --max_step 2000 \
                          --reduced_embedding_size 128
+echo 'Done: re-finetune BERT-ABSA and Generate user/item document embeddings'

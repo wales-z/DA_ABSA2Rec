@@ -8,8 +8,9 @@ import numpy as np
 import pickle
 import time
 import gc
+import copy
 
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.metrics import mean_squared_error
 from utils import ABSAProcessor
 from tqdm import tqdm, trange
 from transformers import BertConfig, BertTokenizer
@@ -62,7 +63,10 @@ MODEL_CLASSES = {
 Dataset_configs = {
     'electronics': (192238, 62973),
     'cell_phones_and_accessories': (27837, 10419),
-    'yelp': (50059, 61634)
+    'yelp': (50059, 61634),
+    'video_games': (24293, 10668),
+    'automotive': (2923, 1833),
+    'musical_instruments': (1425, 900)
 }
 
 
@@ -168,7 +172,7 @@ def init_args():
 
 def main():
     args = init_args()
-    
+
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -188,7 +192,7 @@ def main():
                         datefmt='%m/%d/%Y %H:%M:%S',
                         level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN)
     # not using 16-bits training
-    logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: False",
+    logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s",
                    args.local_rank, device, args.n_gpu, bool(args.local_rank != -1))
     # Set seed
     set_seed(args)
@@ -210,8 +214,12 @@ def main():
     config.tfm_mode = args.tfm_mode
     config.fix_tfm = args.fix_tfm
 
+    num_users = Dataset_configs[args.task_name][0]
+    num_items = Dataset_configs[args.task_name][1]
+    print(f'dataset: {args.task_name}, user num: {num_users}, item num: {num_items}')
+
     # Distributed and parallel training
-    model = DA_ABSA2Rec(args, num_users=Dataset_configs[args.task_name][0], num_items=Dataset_configs[args.task_name][1])
+    model = DA_ABSA2Rec(args, num_users=num_users, num_items=num_items)
     # model = DA_ABSA2Rec(args, num_users=27845, num_items=10429)
     # model = DA_ABSA2Rec(args, num_users=1484, num_items=1840)
     # model = DA_ABSA2Rec_new(args, num_users=1484, num_items=1840)
@@ -254,14 +262,14 @@ def main():
     user_tag_logis = torch.stack([emb[1][1] for emb in user_embs_list])
     user_features = sorted(user_features_dict.items())
     user_masks = torch.stack([torch.tensor(feature[1].input_mask, dtype=torch.long) for feature in user_features]).unsqueeze(dim=-1)
-    user_embs = user_embs * user_masks
+    # user_embs = user_embs * user_masks
 
     item_embs_list = sorted(item_embs_dict.items())
     item_embs = torch.stack([emb[1][0] for emb in item_embs_list])
     item_tag_logis = torch.stack([emb[1][1] for emb in item_embs_list])
     item_features = sorted(item_features_dict.items())
     item_masks = torch.stack([torch.tensor(feature[1].input_mask, dtype=torch.long) for feature in item_features]).unsqueeze(dim=-1)
-    item_embs = item_embs * item_masks
+    # item_embs = item_embs * item_masks
 
     print(f'Done: load user/item embs and features, load train/test set')
 
@@ -271,7 +279,7 @@ def main():
     train_dataset = RecDataset(train_df)
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=20, pin_memory=True)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=4, pin_memory=True)
 
     with open(test_df_path, 'rb') as f_test:
         test_df = pickle.load(f_test)
@@ -279,22 +287,23 @@ def main():
     test_dataset = RecDataset(test_df)
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     test_sampler = SequentialSampler(test_dataset) if args.local_rank == -1 else DistributedSampler(test_dataset)
-    test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=args.eval_batch_size, num_workers=20, pin_memory=True)
+    test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=args.eval_batch_size, num_workers=4, pin_memory=True)
 
     # Do garbage collection to save memory space
     gc.collect()
 
     if args.local_rank in [-1, 0]:
         current_time = time.strftime("%Y-%m-%dT%H:%M", time.localtime())
-        tb_writer = SummaryWriter(log_dir=os.path.join('log', current_time))
+        tb_writer = SummaryWriter(log_dir=os.path.join('tb_log', current_time))
 
     param = {}
     param_s = {}
     for n, p in model.named_parameters():
-        if 'concat_to_1_s' in n:
+        if 'concat_to_1_s' in n or 'classifier' in n:
             param_s[n]=p
         else:
             param[n]=p
+    # print(param_s)
 
     optimizer = torch.optim.AdamW(param.values(), lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.weight_decay)
     optimizer_s = torch.optim.AdamW(param_s.values(), lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.weight_decay)
@@ -308,22 +317,35 @@ def main():
     # loss_func = nn.L1Loss()
     loss_func = nn.MSELoss()
 
+    save_prefix = os.path.join('saved_model', args.task_name)
+    if not os.path.exists(save_prefix):
+        os.mkdir(save_prefix)
+    model_save_path = os.path.join(save_prefix, 'model.pth')
+
     print(f'start training, batch size: {args.per_gpu_train_batch_size}, learning rate: {args.learning_rate}')
 
     train_mse_recorder, test_mse_recorder = [], []
+    min_mse = 5
 
     for epoch_index in range(int(args.num_train_epochs)):
     # epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         # train phase
         all_rating_pred = []
         all_rating_true = []
-        for step, (uid, iid, label_ratings)  in enumerate(tqdm(train_dataloader, desc='training')):
+        # for step, (uid, iid, label_ratings)  in enumerate(tqdm(train_dataloader, desc='training')):
+        for step, (uid, iid, label_ratings)  in enumerate(train_dataloader):
             all_rating_true.extend(label_ratings.numpy())
+
             user_emb = user_embs[uid].to(args.device)
+            user_mask = user_masks[uid].to(args.device)
+            user_emb = user_emb * user_mask
             user_logits = user_tag_logis[uid].to(args.device)
 
             item_emb = item_embs[iid].to(args.device)
+            item_mask = item_masks[iid].to(args.device)
+            item_emb = item_emb * item_mask
             item_logits = item_tag_logis[iid].to(args.device)
+
 
             uid, iid, label_ratings = uid.to(args.device), iid.to(args.device), label_ratings.to(args.device)
 
@@ -338,10 +360,13 @@ def main():
                 'item_logits':  item_logits
             }
             predicted_ratings, sentiment_ratings, u, i = model(**inputs)
-            all_rating_pred.extend(predicted_ratings.data)
+            if predicted_ratings.dim() == 0:
+                all_rating_pred.append(predicted_ratings.data)
+            else:
+                all_rating_pred.extend(predicted_ratings.data)
             # 系数范围 [0.1, 1, 10]
-            # rating_loss = loss_func(sentiment_ratings, label_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
-            rating_loss = loss_func(predicted_ratings, label_ratings) + 10*loss_func(sentiment_ratings, predicted_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
+            # rating_loss = loss_func(predicted_ratings, label_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
+            rating_loss = loss_func(predicted_ratings, label_ratings) + 8*loss_func(sentiment_ratings, predicted_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
             # rating_loss = loss_func(predicted_ratings, label_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
 
             if args.n_gpu > 1:
@@ -351,10 +376,10 @@ def main():
 
             if step%2==0 :
                 optimizer.step()
-                scheduler.step()
+                # scheduler.step()
             else:
                 optimizer_s.step()
-                scheduler_s.step()
+                # scheduler_s.step()
               # Update learning rate schedule
             model.zero_grad()
 
@@ -367,10 +392,15 @@ def main():
         all_rating_true = []
         for (uid, iid, label_ratings) in test_dataloader:
             all_rating_true.extend(label_ratings.numpy())
+
             user_emb = user_embs[uid].to(args.device)
+            user_mask = user_masks[uid].to(args.device)
+            user_emb = user_emb * user_mask
             user_logits = user_tag_logis[uid].to(args.device)
 
             item_emb = item_embs[iid].to(args.device)
+            item_mask = item_masks[iid].to(args.device)
+            item_emb = item_emb * item_mask
             item_logits = item_tag_logis[iid].to(args.device)
 
             uid, iid, label_ratings = uid.to(args.device), iid.to(args.device), label_ratings.to(args.device)
@@ -386,7 +416,10 @@ def main():
                     'item_logits':  item_logits
                 }
                 predicted_ratings, sentiment_ratings, u, i = model(**inputs)
-                all_rating_pred.extend(predicted_ratings.data)
+                if predicted_ratings.dim() == 0:
+                    all_rating_pred.append(predicted_ratings.data)
+                else:
+                    all_rating_pred.extend(predicted_ratings.data)
 
             rating_loss = loss_func(predicted_ratings, label_ratings)
             if args.n_gpu > 1:
@@ -397,10 +430,14 @@ def main():
         print(f'epoch {epoch_index}, train mse: {train_average_mse}, test mse: {test_average_mse}')
         train_mse_recorder.append(train_average_mse)
         test_mse_recorder.append(test_average_mse)
+        if(test_average_mse < min_mse):
+            min_mse = test_average_mse
+            best_model_state = copy.deepcopy(model.state_dict()) 
+            torch.save(best_model_state, model_save_path)
 
     if args.local_rank in [-1, 0]:
         tb_writer.close()
-    min_mse = min(test_mse_recorder)
+    
     print(f'train mse records: {train_mse_recorder}')
     print(f'test mse records: {test_mse_recorder}')
     print(f'finish train&eval, best performance: test mse: {min_mse}')

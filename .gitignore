@@ -26,6 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+saved_model/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -156,6 +157,11 @@ reviews_Electronics_5.json
 /data/cached_train_bert-base-uncased_512_cell_phones_and_accessories
 /data/cached_train_bert-base-uncased_512_cell_phones_and_accessories_tiny
 /data/cached_test_bert-base-uncased_512_cell_phones_and_accessories
+data/automotive/
+data/lambda_effects.png
+data/musical_instruments/
+tb_log/
+data/video_games/
 
 # ABSA module part
 /BERT_E2E_ABSA/bert-tfm-laptop14-finetune

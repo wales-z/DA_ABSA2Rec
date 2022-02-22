@@ -429,7 +429,9 @@ class BertABSATagger(BertPreTrainedModel):
             else:
                 raise Exception('Unimplemented downstream tagger %s...' % self.tagger_config.absa_type)
             penultimate_hidden_size = self.tagger_config.hidden_size
+        # self.classifier = nn.Linear(penultimate_hidden_size, bert_config.num_labels)
         self.classifier = nn.Linear(penultimate_hidden_size, bert_config.num_labels)
+        # self.pooler = nn.AdaptiveMaxPool1d(128)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None,
                 position_ids=None, head_mask=None, fine_tune=False):
@@ -442,6 +444,7 @@ class BertABSATagger(BertPreTrainedModel):
         #print("tagger_input.shape:", tagger_input.shape)
         if self.tagger is None or self.tagger_config.absa_type == 'crf':
             # regard classifier as the tagger
+            # tagger_input = self.pooler(tagger_input)
             logits = self.classifier(tagger_input)
         else:
             if self.tagger_config.absa_type == 'lstm':
@@ -458,6 +461,7 @@ class BertABSATagger(BertPreTrainedModel):
                 classifier_input = classifier_input.transpose(0, 1)
             else:
                 raise Exception("Unimplemented downstream tagger %s..." % self.tagger_config.absa_type)
+            # classifier_input = self.pooler(classifier_input)
             classifier_input = self.tagger_dropout(classifier_input)
             logits = self.classifier(classifier_input)
         outputs = (logits,) + outputs[2:]
