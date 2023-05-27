@@ -10,12 +10,12 @@ import time
 import gc
 import copy
 
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from utils import ABSAProcessor
 from tqdm import tqdm, trange
 from transformers import BertConfig, BertTokenizer
 from transformers import AdamW, get_linear_schedule_with_warmup
-from models import BertABSATagger, DA_ABSA2Rec_new, DA_ABSA2Rec
+from models import BertABSATagger, DA_ABSA2Rec_new, DA_ABSA2Rec, ContrastiveLoss
 from dataset import RecDataset
 
 from torch.utils.data import DataLoader, Dataset, TensorDataset, RandomSampler, SequentialSampler
@@ -95,7 +95,7 @@ def init_args():
     parser.add_argument("--task_name", default='cell_phones_and_accessories', type=str,
                         help="The name of the task to train selected in the list:[]")
     parser.add_argument('--tiny', action='store_true', 
-                        help='Weather to generate a tiny version of dataset')
+                        help='Weather to use a tiny version of dataset')
     ## Other parameters
     parser.add_argument("--config_name", default="", type=str,
                         help="Pretrained config name or path if not the same as model_name")
@@ -186,6 +186,7 @@ def main():
         args.n_gpu = 1
 
     args.device = device
+    # args.device = torch.device('cpu')
 
     # Setup logging
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -289,7 +290,7 @@ def main():
     test_sampler = SequentialSampler(test_dataset) if args.local_rank == -1 else DistributedSampler(test_dataset)
     test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=args.eval_batch_size, num_workers=4, pin_memory=True)
 
-    # Do garbage collection to save memory space
+    # Conduct garbage collection to save memory usage
     gc.collect()
 
     if args.local_rank in [-1, 0]:
@@ -313,9 +314,10 @@ def main():
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1*len(train_dataloader), gamma=0.9)
     scheduler_s = torch.optim.lr_scheduler.StepLR(optimizer_s, step_size=1*len(train_dataloader), gamma=0.9)
 
-    get_mse = nn.MSELoss()
     # loss_func = nn.L1Loss()
     loss_func = nn.MSELoss()
+    # loss_func = nn.CrossEntropyLoss()
+    # loss_func = ContrastiveLoss(margin=4)
 
     save_prefix = os.path.join('saved_model', args.task_name)
     if not os.path.exists(save_prefix):
@@ -332,6 +334,7 @@ def main():
         # train phase
         all_rating_pred = []
         all_rating_true = []
+        total_loss = 0
         # for step, (uid, iid, label_ratings)  in enumerate(tqdm(train_dataloader, desc='training')):
         for step, (uid, iid, label_ratings)  in enumerate(train_dataloader):
             all_rating_true.extend(label_ratings.numpy())
@@ -346,7 +349,7 @@ def main():
             item_emb = item_emb * item_mask
             item_logits = item_tag_logis[iid].to(args.device)
 
-
+            # label_ratings = label_ratings-1
             uid, iid, label_ratings = uid.to(args.device), iid.to(args.device), label_ratings.to(args.device)
 
             model.train()
@@ -359,19 +362,24 @@ def main():
                 'item_emb':     item_emb,
                 'item_logits':  item_logits
             }
+            # predicted_ratings_logits, sentiment_ratings_logits, u, i = model(**inputs)
             predicted_ratings, sentiment_ratings, u, i = model(**inputs)
+            # predicted_ratings = torch.argmax(predicted_ratings_logits, dim=-1)+1
+            # sentiment_ratings = torch.argmax(sentiment_ratings_logits, dim=-1)+1
             if predicted_ratings.dim() == 0:
                 all_rating_pred.append(predicted_ratings.data)
             else:
                 all_rating_pred.extend(predicted_ratings.data)
+            # label_ratings = label_ratings.to(torch.long)
             # 系数范围 [0.1, 1, 10]
-            # rating_loss = loss_func(predicted_ratings, label_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
+            # rating_loss = loss_func(predicted_ratings_logits, sentiment_ratings_logits, label_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
             rating_loss = loss_func(predicted_ratings, label_ratings) + 8*loss_func(sentiment_ratings, predicted_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
-            # rating_loss = loss_func(predicted_ratings, label_ratings) + args.weight_decay * torch.linalg.vector_norm(u) + args.weight_decay * torch.linalg.vector_norm(i)
+            rating_loss = rating_loss.requires_grad()
 
             if args.n_gpu > 1:
                 rating_loss = rating_loss.mean()
 
+            total_loss += rating_loss
             rating_loss.backward()
 
             if step%2==0 :
@@ -383,6 +391,7 @@ def main():
               # Update learning rate schedule
             model.zero_grad()
 
+        print(f'loss:{total_loss}')
         train_average_mse = mean_squared_error(np.array(all_rating_true), np.array(all_rating_pred))
         tb_writer.add_scalar('Train/mse', train_average_mse, epoch_index)
         tb_writer.add_scalar('learning_rate', scheduler.get_last_lr()[0], epoch_index)
@@ -390,6 +399,7 @@ def main():
         # test phase
         all_rating_pred = []
         all_rating_true = []
+        model.eval()
         for (uid, iid, label_ratings) in test_dataloader:
             all_rating_true.extend(label_ratings.numpy())
 
@@ -403,6 +413,7 @@ def main():
             item_emb = item_emb * item_mask
             item_logits = item_tag_logis[iid].to(args.device)
 
+            label_ratings = label_ratings-1
             uid, iid, label_ratings = uid.to(args.device), iid.to(args.device), label_ratings.to(args.device)
 
             with torch.no_grad():
@@ -415,19 +426,22 @@ def main():
                     'item_emb':     item_emb,
                     'item_logits':  item_logits
                 }
-                predicted_ratings, sentiment_ratings, u, i = model(**inputs)
+                predicted_ratings_logits, sentiment_ratings, u, i = model(**inputs)
+                predicted_ratings = torch.argmax(predicted_ratings_logits, dim=-1)+1
                 if predicted_ratings.dim() == 0:
                     all_rating_pred.append(predicted_ratings.data)
                 else:
                     all_rating_pred.extend(predicted_ratings.data)
 
-            rating_loss = loss_func(predicted_ratings, label_ratings)
-            if args.n_gpu > 1:
-                rating_loss = rating_loss.mean()
+            label_ratings = label_ratings.to(torch.long)
+            # rating_loss = loss_func(predicted_ratings_logits, label_ratings)
+            # if args.n_gpu > 1:
+            #     rating_loss = rating_loss.mean()
 
         test_average_mse = mean_squared_error(np.array(all_rating_true), np.array(all_rating_pred))
+        test_average_mae = mean_absolute_error(np.array(all_rating_true), np.array(all_rating_pred))
         tb_writer.add_scalar('test/mse', test_average_mse, epoch_index)
-        print(f'epoch {epoch_index}, train mse: {train_average_mse}, test mse: {test_average_mse}')
+        print(f'epoch {epoch_index}, train mse: {train_average_mse}, test mse: {test_average_mse}, test mae: {test_average_mae}')
         train_mse_recorder.append(train_average_mse)
         test_mse_recorder.append(test_average_mse)
         if(test_average_mse < min_mse):

@@ -162,6 +162,8 @@ data/lambda_effects.png
 data/musical_instruments/
 tb_log/
 data/video_games/
+data/reviews_Musical_Instruments_5_corpus.tsv
+data/word_embedding_embed_dim_100.npy
 
 # ABSA module part
 /BERT_E2E_ABSA/bert-tfm-laptop14-finetune

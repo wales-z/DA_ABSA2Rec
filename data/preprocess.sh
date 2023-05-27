@@ -6,6 +6,7 @@ echo 'ABSA dataset': ${TASK_NAME}
 echo 'ABSA layer': ${ABSA_TYPE}
 echo 'Rec dataset': ${RS_TASK_NAME}
 
+# unmark the following lines if you want to use a pretrained BERT-ABSA network
 # echo 'Now doing: train and save the BERT-ABSA network (including fine-tuning BERT and train ABSA layer'
 # cd ../BERT_E2E_ABSA
 # CUDA_VISIBLE_DEVICES=2 PYTHONIOENCODING=utf-8 python main.py --model_type bert \

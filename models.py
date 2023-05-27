@@ -5,6 +5,7 @@ from transformers import BertModel, XLNetModel
 from seq_utils import *
 from bert import BertPreTrainedModel, XLNetPreTrainedModel
 from torch.nn import CrossEntropyLoss
+import torch.nn.functional as F
 
 
 class TaggerConfig:
@@ -731,26 +732,26 @@ class DA_ABSA2Rec(nn.Module):
         nn.init.constant_(self.position_to_1[0].bias, 0)
 
         self.concat_to_1 = nn.Sequential(
-            # nn.Linear(2*self.reduced_embedding_size, 4*reduced_embedding_size),
-            # nn.Dropout(0.5),
-            # nn.Sigmoid(),
-            # nn.Linear(4*reduced_embedding_size, 2*reduced_embedding_size),
-            # nn.Dropout(0.5),
-            # nn.Sigmoid(),
-            nn.Linear(2*reduced_embedding_size, 1),
+            nn.Linear(2*self.reduced_embedding_size, 4*reduced_embedding_size),
+            nn.Dropout(0.5),
             nn.Sigmoid(),
+            nn.Linear(4*reduced_embedding_size, 2*reduced_embedding_size),
+            nn.Dropout(0.5),
+            nn.Sigmoid(),
+            nn.Linear(2*reduced_embedding_size, 5),
+            # nn.Sigmoid(),
             # nn.BatchNorm1d(1)
         )
         nn.init.xavier_normal_(self.concat_to_1[0].weight)
         # nn.init.uniform_(self.concat_to_1[0].weight, -0.01, 0.01)
-        nn.init.constant_(self.concat_to_1[0].bias, 0)
-        # nn.init.xavier_normal_(self.concat_to_1[3].weight)
+        # nn.init.constant_(self.concat_to_1[0].bias, 0)
+        nn.init.xavier_normal_(self.concat_to_1[3].weight)
         # nn.init.constant_(self.concat_to_1[3].bias, 0)
-        # nn.init.xavier_normal_(self.concat_to_1[6].weight)
+        nn.init.xavier_normal_(self.concat_to_1[6].weight)
         # nn.init.constant_(self.concat_to_1[6].bias, 0)
 
         self.concat_to_1_s = nn.Sequential(
-            nn.Linear(2*14, 1),
+            nn.Linear(2*14, 5),
             nn.Sigmoid()
         )
         nn.init.xavier_normal_(self.concat_to_1_s[0].weight)
@@ -869,8 +870,9 @@ class DA_ABSA2Rec(nn.Module):
         user_emb_s = torch.sum(user_prob, dim=-2)
         item_emb_s = torch.sum(item_prob, dim=-2)
 
-        # sentiment_ratings = torch.sum(user_emb_s*item_emb_s, dim=-1)
-        sentiment_ratings = self.concat_to_1_s(torch.cat((user_emb_s, item_emb_s), dim=-1)).squeeze() + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze()
+        sentiment_ratings = torch.sum(user_emb_s*item_emb_s, dim=-1)
+        # sentiment_ratings = self.concat_to_1_s(torch.cat((user_emb_s, item_emb_s), dim=-1)).squeeze() + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze() # shape: (bsz)
+        # sentiment_ratings = self.concat_to_1_s(torch.cat((user_emb_s, item_emb_s), dim=-1)).squeeze() # shape: (bsz, 5)
         sentiment_ratings = 1 + 4 * torch.sigmoid(sentiment_ratings)
 
         # no aspect and no sentiment
@@ -880,8 +882,9 @@ class DA_ABSA2Rec(nn.Module):
         user_output = torch.sum(user_emb, dim=-2) / self.max_sequence_length
         item_output = torch.sum(item_emb, dim=-2) / self.max_sequence_length
 
-        # predicted_ratings = torch.sum(user_output*item_output, dim=-1)
-        predicted_ratings = self.concat_to_1(torch.cat((user_output, item_output), dim=-1)).squeeze() + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze()
+        predicted_ratings = torch.sum(user_output*item_output, dim=-1)
+        # predicted_ratings = self.concat_to_1(torch.cat((user_output, item_output), dim=-1)).squeeze() + self.user_bias(uid).squeeze() + self.item_bias(iid).squeeze() # shape: (bsz)
+        # predicted_ratings = self.concat_to_1(torch.cat((user_output, item_output), dim=-1)).squeeze() # shape: (bsz, 5)
         predicted_ratings = 1 + 4 * torch.sigmoid(predicted_ratings)
 
         # # aspect + sentiment (or only one of them), we shall not use this since we found it not helpful to the performence
@@ -902,57 +905,31 @@ class DA_ABSA2Rec(nn.Module):
 
         return predicted_ratings, sentiment_ratings, user_output, item_output
 
-# class Google_version(nn.Module):
-#     def __init__(self, num_users, num_items, vocab_size, wid_wEmbed_path, user_doc_path, item_doc_path):
-#         self.num_users = num_users
-# 		self.num_items = num_items
-#         self.vocab_size = vocab_size
 
-# 		# User Documents & Item Documents (Input)
-# 		self.uid_userDoc = nn.Embedding(self.num_users, self.512)
-# 		self.uid_userDoc.weight.requires_grad = False
-#         np_uid_userDoc = np.load( uid_userDoc_path )
-#         self.uid_userDoc.weight.data.copy_(torch.from_numpy(np_uid_userDoc).long())
 
-# 		self.iid_itemDoc = nn.Embedding(self.num_items, self.512)
-# 		self.iid_itemDoc.weight.requires_grad = False
-#         np_iid_itemDoc = np.load( iid_itemDoc_path )
-#         self.iid_itemDoc.weight.data.copy_(torch.from_numpy(np_iid_itemDoc).long())
+class ContrastiveLoss_ori(torch.nn.Module):
+    """
+    Contrastive loss function.
+    Based on: http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
+    """
+    def __init__(self, margin=2.0):
+        super(ContrastiveLoss, self).__init__()
+        self.margin = margin
 
-# 		# Word Embeddings (Input)
-# 		self.wid_wEmbed = nn.Embedding(self.vocab_size, self.args.word_embed_dim)
-# 		self.wid_wEmbed.weight.requires_grad = False
-#         np_wid_wEmbed = np.load( wid_wEmbed_path )
-#         self.wid_wEmbed.weight.data.copy_(torch.from_numpy(np_wid_wEmbed))
+    def forward(self, output1, output2, label):
+        euclidean_distance = F.pairwise_distance(output1, output2, keepdim=True)
+        loss_contrastive = torch.mean((1-label) * torch.pow(euclidean_distance, 2) +
+                                      (label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
+        return loss_contrastive
 
-# 		# Aspect Representation Learning - Single Aspect-based Attention Network (Shared between User & Item)
-# 		self.pooler = nn.AdaptiveAvgPool1d(128)
-# 		self.concat_to_1 = nn.Sequential(
-# 			nn.Linear(2*128, 1),
-# 			nn.Sigmoid(),
-# 		)
-# 		nn.init.xavier_normal_(self.concat_to_1[0].weight)
-# 		nn.init.constant_(self.concat_to_1[0].bias, 0)
-    
-#     def forward(self, uid, iid):
-# 		# Input
-# 		batch_userDoc = self.uid_userDoc(batch_uid)
-# 		batch_itemDoc = self.iid_itemDoc(batch_iid)
 
-# 		# Embedding Layer
-# 		# shape: (bsz, seq_len, 300)
-# 		batch_userDocEmbed = self.wid_wEmbed(batch_userDoc.long())
-# 		batch_itemDocEmbed = self.wid_wEmbed(batch_itemDoc.long())
+class ContrastiveLoss(torch.nn.Module):
+    def __init__(self, tempreture=0.5):
+        super(ContrastiveLoss, self).__init__()
+        self.margin = margin
 
-# 		# shape: (bsz, seq_len, 128)
-# 		batch_userDocEmbed = self.pooler(batch_userDocEmbed)
-# 		batch_itemDocEmbed = self.pooler(batch_itemDocEmbed)
-
-# 		# shape: (bsz, 128)
-# 		batch_userDocEmbed = torch.sum(batch_userDocEmbed, dim=-2)
-# 		batch_itemDocEmbed = torch.sum(batch_itemDocEmbed, dim=-2)
-
-# 		# shape: (bsz)
-# 		rating_pred = self.concat_to_1(torch.cat((batch_userDocEmbed, batch_itemDocEmbed), dim=-1)).squeeze()
-
-# 		return rating_pred
+    def forward(self, output1, output2, label):
+        euclidean_distance = F.pairwise_distance(output1, output2, keepdim=True)
+        loss_contrastive = torch.mean((1-label) * torch.pow(euclidean_distance, 2) +
+                                      (label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
+        return loss_contrastive

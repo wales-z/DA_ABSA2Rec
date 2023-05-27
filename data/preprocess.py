@@ -37,7 +37,6 @@ class Preprocessor:
             raw_df = raw_df[['user_id', 'business_id', 'text', 'stars']].reset_index(drop=True)
             raw_df.rename({'user_id':'reviewerID', 'business_id':'asin', 'text':'reviewText', 'stars':'overall'}, axis='columns', inplace=True)
 
-        # 消除所有空评论,这句可能导致一个用户的交互数少于5
         df = raw_df[raw_df['reviewText']!='']
 
         if tiny == True:

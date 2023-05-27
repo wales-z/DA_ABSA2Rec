@@ -1,37 +1,13 @@
-# Put your dataset files in this folder
-In our experiment, we choose Amazon reviews 5-core "Electornics", "Cell Phones and Accessories" and Yelp reviews.
+# data preprocess
 
-# Dataset Info
-Some basic Information for the dataset we use.
-## 1 Amazon reviews 5-core
-### 1.1 Electronics
-user num: 192238
-item num: 62973
-review num: 1687366
-### 1.2 Cell Phones and Accessories
-user num: 27845
-item num: 10429
-review/rating num: 194204 
+Put your dataset files in this folder, like: `data/reviews_Automotive_5.json`.
 
-> tiny version: (choose former 30000 / 50000 and filter out users with at least 5 interactions)
-> user num: 814 / 1484
-> item num: 1370 / 1988
-> review/rating num: 4909 / 9146 
+In our experiment, we choose Amazon reviews 5-core "Electornics", "Cell Phones and Accessories", "Video Games", "Automotive", "Musical Instruments".
 
-## 2 Yelp reviews
-user num: 50059
-item num: 61634
-review/rating num: 1005090 
-> yelp数据集提供了3个对评论质量进行评价的维度并由用户自行评价（类似对评论点赞、点踩）：userful, funny, cool（以下都是 review 数量）
-> original: 8635403 
-> when filtering with useful>0: 3877235
-> when filtering with funny>0: 1596435 (不建议用这个)
-> when filtering with cool>0: 1948423
-> when filtering with useful>0 & cool>0: 1679558
-> when filtering with all 3 conditions above: 954713
-> 
-> when filtering with 5-core setting: 5766970
-> when filtering with 10-core setting: 4219140
-> 
-> when filtering with 5-core & useful>0: 2334990
-> when filtering with 5-core & useful>0 & cool>0: 1005090 (this is chosen)
+You need to modify this dict: `dataset_to_rawfile_name` in `preprocess.py` if you uses new datasets. This is a dict with dataset abbreviation as key and raw dataset filename as value.
+
+Then change the RS_TASK_NAME in `preprocess.sh` with a dataset abbreviation and run it.
+
+```bash
+sh preprocess.sh
+```
